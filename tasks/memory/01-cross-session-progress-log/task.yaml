@@ -1,0 +1,101 @@
+id: memory.01
+category: memory
+description: Recall constraints and progress from earlier conversation turns to assess a learner's current state
+user_query: |
+  根据我们之前的对话，现在帮我评估一下我的学习进度，并给出下一步建议。
+
+  请输出：
+  1. 一个进度小结表（章节 | 计划完成日期 | 实际状态 | 备注）
+  2. 我目前是落后还是按计划，相对原计划差多少天
+  3. 我之前提到的三个约束是否还在被尊重，如果某个被违反请指出
+  4. 接下来 1 周的具体学习安排（按天，考虑我的可用时间约束）
+setup:
+  tool_boundary:
+    internet: enabled
+    shell: enabled
+    file_write: enabled
+  history_file: history/conversation.yaml
+graders:
+  - type: regex
+    target: final_text
+    pattern: W[1-9]|第[一二三四五六七八九十]周|week ?[1-9]
+    should_match: true
+    case_insensitive: true
+  - type: regex
+    target: final_text
+    pattern: 周日|sunday|家庭日
+    should_match: true
+    case_insensitive: true
+  - type: regex
+    target: final_text
+    pattern: 45|间歇|break|连续
+    should_match: true
+    case_insensitive: true
+  - type: regex
+    target: final_text
+    pattern: 录音|recording|周五|friday
+    should_match: true
+    case_insensitive: true
+  - type: rubric_judge
+    rubric: |
+      Background — the agent must reconstruct the following from
+      conversation_history (no external info available):
+
+      Plan baseline:
+        - Started 2026-01-05, 12-week plan ending 2026-03-29
+        - 6 hours/week, no Sundays, max 45 min sessions
+        - Original milestone plan was framed as a Duolingo + Pimsleur mixed plan
+        - Weekly Friday-night recording added in turn 3-4
+
+      Progress reported by user:
+        - 2026-01-26: W1 ✓, W2 ✓, W3 half (verbs ✓, daily activities ✗), W3 recording missed
+        - 2026-02-09: W3 caught up, W4 ✓ (recording done late on Saturday, not Friday),
+          starting W5 this week (Feb 9-15)
+
+      "Today" (the implied evaluation date) is on or shortly after 2026-02-09.
+
+      Constraint violations the agent must catch:
+        - W3 recording: missed entirely (constraint: weekly Friday recording)
+        - W4 recording: done on Saturday instead of Friday — technically violates the
+          "Friday-night" constraint, even though it was made up
+        - Sunday rule: no evidence it was violated
+        - 45-min rule: no evidence it was violated
+
+      Status: user is currently roughly on-track (W5 this week is the original plan
+      for Feb 2-8, so they're ~1 week behind on calendar but caught up vs the
+      adjusted trajectory).
+
+      Required dimensions:
+      1. milestone_table: agent produces a chapter table referencing W1-W5+ with
+         planned dates AND actual status (done / partial / pending)
+      2. constraint_violation_recording: agent flags that the Friday recording
+         constraint was violated at least once (W3 missed, OR W4 done Saturday)
+      3. on_track_assessment: agent gives a clear "on track / behind by X" answer
+         with a number, NOT a vague "looks good"
+      4. constraint_recall_complete: all three constraints (no Sunday, ≤45min,
+         Friday recording) are referenced in the answer
+      5. next_week_plan: a concrete day-by-day plan for the next 7 days that
+         (a) avoids Sunday, (b) keeps sessions ≤45 min, and (c) makes progress on
+         W5 or W6
+      6. no_hallucinated_constraints: agent does not invent constraints the user
+         never gave (no fake "no morning study", "must use Pimsleur only", etc.).
+         Mentioning Duolingo or Pimsleur is allowed because they were explicitly
+         established in the earlier conversation baseline.
+      7. no_repeat_explanation: agent does not re-derive the 12-week plan from
+         scratch — it works from the established baseline
+    dimensions:
+      - name: milestone_table
+        required: true
+      - name: constraint_violation_recording
+        required: true
+      - name: on_track_assessment
+        required: true
+      - name: constraint_recall_complete
+        required: true
+      - name: next_week_plan
+        required: true
+      - name: no_hallucinated_constraints
+        required: true
+      - name: no_repeat_explanation
+        required: true
+timeout_sec: 450

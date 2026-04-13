@@ -1,0 +1,7 @@
+{
+  "name": "cascading-fix",
+  "type": "module",
+  "dependencies": {
+    "typescript": "^5.5.0"
+  }
+}

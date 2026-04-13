@@ -1,0 +1,151 @@
+id: implementation.02
+category: implementation
+description: Draft an incident postmortem from raw timeline + impact + root cause notes
+user_query: |
+  我们昨晚出了一个面向客户的事故，我现在要补一份正式 postmortem 给内部和管理层看。`incident/` 目录里有：
+  - timeline.md（oncall 写的原始时间线）
+  - customer-impact.csv（受影响客户和金额）
+  - root-cause.md（工程师事后查清的根因）
+  - chat-snippets.md（事故期间的关键对话片段）
+
+  你帮我把这些素材整理成一份正式 postmortem，保存为 `postmortem.md`。结构如下（必须包含所有这些 section）：
+
+  # Incident Postmortem — <一句话标题>
+
+  ## TL;DR
+  （2-3 句，写给非技术 stakeholder：发生了什么、影响多大、是否已修）
+
+  ## Customer Impact
+  （受影响客户数、收入影响、最严重的客户案例 1-2 个）
+
+  ## Timeline
+  （markdown table: time | event）
+
+  ## Root Cause
+  （technical 解释，5-why 风格，引导到最深层原因）
+
+  ## What Went Well
+  ## What Went Wrong
+  ## Action Items
+  （markdown table: id | action | owner | due_date | priority）
+
+  约束：
+  - TL;DR 不要含 jargon
+  - Action Items 必须有真实 owner（从素材里 chat-snippets 能看到名字），不能用 "TBD" 或 "team"
+  - 至少 4 条 action items，覆盖 detection / mitigation / prevention 三类
+  - 不要捏造事实，只能基于 incident/ 里的内容
+setup:
+  tool_boundary:
+    internet: enabled
+    shell: enabled
+    file_write: enabled
+  workspace_dir: workspace
+graders:
+  - type: file_exists
+    paths:
+      - postmortem.md
+  - type: trajectory
+    rule:
+      kind: tool_called
+      tool_pattern: read|Read|read_file|glob|Glob|ls|cat|head|view|Bash|shell|grep|Grep|search_files|mcp_read_file|terminal|execute_code|process|patch
+      min: 3
+  - type: regex
+    target: artifact
+    artifact_path: postmortem.md
+    pattern: TL;DR|TLDR|tl;dr
+    should_match: true
+    case_insensitive: true
+  - type: regex
+    target: artifact
+    artifact_path: postmortem.md
+    pattern: Customer Impact|客户影响
+    should_match: true
+    case_insensitive: true
+  - type: regex
+    target: artifact
+    artifact_path: postmortem.md
+    pattern: Timeline|时间线
+    should_match: true
+    case_insensitive: true
+  - type: regex
+    target: artifact
+    artifact_path: postmortem.md
+    pattern: Root Cause|根因|根本原因
+    should_match: true
+    case_insensitive: true
+  - type: regex
+    target: artifact
+    artifact_path: postmortem.md
+    pattern: Action Items|行动项|后续动作
+    should_match: true
+    case_insensitive: true
+  - type: regex
+    target: artifact
+    artifact_path: postmortem.md
+    pattern: alex
+    should_match: true
+    case_insensitive: true
+  - type: regex
+    target: artifact
+    artifact_path: postmortem.md
+    pattern: priya
+    should_match: true
+    case_insensitive: true
+  - type: regex
+    target: artifact
+    artifact_path: postmortem.md
+    pattern: tom
+    should_match: true
+    case_insensitive: true
+  - type: regex
+    target: artifact
+    artifact_path: postmortem.md
+    pattern: \bTBD\b|\bTODO\b
+    should_match: false
+    case_insensitive: true
+  - type: rubric_judge
+    rubric: |
+      Ground truth (must be reflected in the postmortem):
+
+      Real root cause: worker-reconcile concurrency raised from 20 to 180 → each worker
+      held an idle-in-transaction pg connection → exhausted the 200-connection pool →
+      checkout-api couldn't acquire connections → 5xx.
+
+      Customer impact total: ~382 failed orders, ~$32,614 revenue loss across 8 customers,
+      enterprise customers (Acme, GoodFoods, Northwind) hardest hit.
+
+      Real owners that must appear in action items (from chat-snippets):
+        - alex: pg connection alert threshold + runbook section
+        - priya: dashboard widget for top pg connection holders
+        - tom: code review requirement on worker-config + reconcile load test
+
+      Required dimensions:
+      1. customer_impact_quantified: TL;DR or Customer Impact section cites order/revenue numbers within 10% of ground truth
+      2. enterprise_called_out: at least one enterprise customer (Acme, GoodFoods, Northwind) named
+      3. root_cause_correct: explains the concurrency=180 → idle-in-transaction → pool exhaustion chain
+      4. timeline_table: timeline section is in markdown table form
+      5. action_items_table: action items are in markdown table form with id/action/owner/due/priority columns
+      6. all_5_actions_present: all 5 priya-listed action items are captured (alert, dashboard, code review, load test, runbook)
+      7. owners_concrete: every action has a real person name (alex, priya, or tom), no TBD/team placeholder
+      8. tldr_jargon_free: TL;DR avoids deeply technical terms (no "idle-in-transaction", "max_connections", etc.)
+      9. five_why_visible: root cause section shows iterative why-questioning (not just one shallow line)
+    dimensions:
+      - name: customer_impact_quantified
+        required: true
+      - name: enterprise_called_out
+        required: true
+      - name: root_cause_correct
+        required: true
+      - name: timeline_table
+        required: true
+      - name: action_items_table
+        required: true
+      - name: all_5_actions_present
+        required: true
+      - name: owners_concrete
+        required: true
+      - name: tldr_jargon_free
+        required: true
+      - name: five_why_visible
+        required: false
+timeout_sec: 600

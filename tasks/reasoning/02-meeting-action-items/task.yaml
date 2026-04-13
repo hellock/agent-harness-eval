@@ -1,0 +1,93 @@
+id: reasoning.02
+category: reasoning
+description: Extract action items from a messy meeting transcript with owners, deadlines, blockers
+user_query: |
+  `meeting/2026-04-07-product-sync.md` 是这周产品同步会的原始转写，内容有点乱。你帮我把里面真正需要跟进的 action items 抽出来，按下面的格式直接放到 final_text 里（不用写文件）：
+
+  | id | action | owner | due_date | blocker |
+
+  规则：
+  - id 用 A1, A2, A3... 顺序编号
+  - owner 必须是具体人名（会议中提到的真实姓名），不写 "team"
+  - due_date 用 YYYY-MM-DD 格式；如果会议里说"下周二"，按今天是 2026-04-07（星期二）算
+  - 如果某项有阻塞依赖，blocker 列写阻塞原因；没有就写 "—"
+  - **隐含 action**：如果某人在会议中明确承诺或被分配但没说 due，标 due_date=TBD 而不是漏掉
+  - 不要把"以后再讨论"、"考虑一下"、"看看"这种模糊承诺当成 action item
+
+  最后给一个一句话风险摘要：哪个 action 可能错过 deadline，为什么。
+setup:
+  tool_boundary:
+    internet: enabled
+    shell: enabled
+    file_write: enabled
+  workspace_dir: workspace
+graders:
+  - type: trajectory
+    rule:
+      kind: tool_called
+      tool_pattern: read|Read|read_file|glob|Glob|ls|cat|head|view|Bash|shell|grep|Grep|search_files|mcp_read_file|terminal|execute_code|process|patch
+      min: 1
+  - type: regex
+    target: final_text
+    pattern: id.*action.*owner.*due
+    should_match: true
+    case_insensitive: true
+  - type: regex
+    target: final_text
+    pattern: Priya
+    should_match: true
+  - type: regex
+    target: final_text
+    pattern: Jordan
+    should_match: true
+  - type: regex
+    target: final_text
+    pattern: Tom
+    should_match: true
+  - type: regex
+    target: final_text
+    pattern: Linh
+    should_match: true
+  - type: rubric_judge
+    rubric: |
+      Ground truth — the meeting contains 7 person-owned action items plus one
+      broad self-review reminder addressed to the whole group. Because the task requires
+      owner to be a specific real person name, that group reminder should
+      NOT be required in a correct answer.
+      A correct answer should produce 6-7 person-owned items and NOT include the parked items.
+
+      Expected action items:
+        A1. Priya — onboarding wireframes v3, due 2026-04-10 (Friday)
+        A2. Jordan — start onboarding rebuild after wireframes, due ~2026-04-13 to 2026-04-17 (5 days starting Monday)
+        A3. Tom — onboarding test plan, due 2026-04-14 (Tue) ("next Tuesday" from 2026-04-07)
+        A4. Linh — updated pricing A/B stats, due 2026-04-13 (Mon EOD)
+        A5. Priya — SSO docs first draft, due ~2026-04-17 ("end of next week"); blocker: depends on wireframes (A1)
+        A6. Jordan — implement enterprise-corp audit log export, due ~2026-04-11 (this week)
+        A7. Tom — regression test for audit log export, due ~2026-04-15-17 (mid next week); blocker: A6 PR
+      Items that MUST be excluded (parked / vague):
+        - Cohort analysis ("park it for now")
+        - CI runner upgrade ("no commit, next quarter")
+        - Priya's 1:1 with Maya (informal, no concrete deliverable)
+        - The broad self-review reminder as a table row, because owner must be a specific person name
+
+      Required dimensions:
+      1. action_count_correct: extracted 6-7 person-owned items (missing 1 is OK; missing 3+ fails)
+      2. owner_specificity: every action has a real person name, no "team"
+      3. due_date_format: dates are in YYYY-MM-DD format and roughly correct (within ±2 days of ground truth) OR labeled TBD
+      4. blockers_captured: A5 references wireframes blocker; A7 references A6 / Jordan's PR blocker
+      5. parked_items_excluded: cohort analysis and CI runner upgrade are NOT in the table
+      6. risk_summary_present: there is a one-sentence risk note about which action is most at-risk (commonly: A5 SSO docs because it depends on A1, or A2 because of dependency chain)
+    dimensions:
+      - name: action_count_correct
+        required: true
+      - name: owner_specificity
+        required: true
+      - name: due_date_format
+        required: true
+      - name: blockers_captured
+        required: true
+      - name: parked_items_excluded
+        required: true
+      - name: risk_summary_present
+        required: true
+timeout_sec: 450

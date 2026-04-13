@@ -1,0 +1,91 @@
+id: skills.03
+category: skills
+description: Analyse 90 days of SKU sales data — find anomalous drops, suspect causes, recommend actions
+user_query: |
+  `data/sales-90d.csv` 是我们 12 个 SKU 最近 90 天的每日销量。我想先快速看一眼哪些 SKU 掉得最厉害，你帮我做个分析：
+
+  1. 算出每个 SKU 的"近 30 天平均销量" vs "前 60 天平均销量"，按下降幅度从大到小排序
+  2. 找出下降 ≥30% 的 SKU（这些是需要立刻关注的）
+  3. 对每个异常 SKU，从 data/notes.md 里看看有没有相关的运营/产品事件能解释下降；如果没有，明确说"原因未知"
+  4. 给出一份行动建议，每个异常 SKU 一条具体动作（不要空话），按业务影响（销量绝对值）排序
+
+  在 final_text 中输出：
+  - 完整 12 个 SKU 的对比表（sku | prev_60d_avg | last_30d_avg | change_pct）
+  - 异常 SKU 列表 + 推测原因 + 行动建议
+setup:
+  prepare_commands:
+    - python3 scripts/generate_sales.py
+  tool_boundary:
+    internet: enabled
+    shell: enabled
+    file_write: enabled
+  workspace_dir: workspace
+graders:
+  - type: file_exists
+    paths:
+      - data/sales-90d.csv
+  - type: trajectory
+    rule:
+      kind: tool_called
+      tool_pattern: read|Read|read_file|glob|Glob|ls|cat|head|view|Bash|shell|grep|Grep|search_files|mcp_read_file|terminal|execute_code|process|patch
+      min: 2
+  - type: regex
+    target: final_text
+    pattern: SKU-B1
+    should_match: true
+  - type: regex
+    target: final_text
+    pattern: SKU-D1
+    should_match: true
+  - type: regex
+    target: final_text
+    pattern: SKU-F1
+    should_match: true
+  - type: rubric_judge
+    rubric: |
+      Ground truth (deterministic via scripts/generate_sales.py with seed 42):
+
+      Anomalies (drops ≥30%):
+        - SKU-B1: ~120 → ~68  (-43%)
+            Cause from notes: supplier change on 2026-02-15 → packaging quality
+            issues → customer complaints. Strong causal link.
+        - SKU-D1: ~67 → ~41   (-39%)
+            Cause from notes: customer survey on 2026-03-25 mentions pack-size
+            mismatch (only single-unit packs available) — weak / partial
+            explanation. Acceptable to flag this OR to say "weak signal, needs
+            deeper investigation".
+        - SKU-F1: ~210 → ~134 (-36%)
+            Cause from notes: homepage banner removed for Valentine's campaign
+            on 2026-02-22 and never restored. Strong causal link.
+
+      Non-anomalies that must NOT appear in the action list:
+        - SKU-A1, SKU-A2, SKU-B2, SKU-C1, SKU-C2, SKU-D2, SKU-E1, SKU-E2, SKU-F2
+        (each within ±10% of baseline due to seeded noise)
+
+      Required dimensions:
+      1. all_three_anomalies_caught: SKU-B1, SKU-D1, SKU-F1 all named as anomalies
+      2. no_false_positives: none of the 9 stable SKUs are flagged as anomalies
+      3. table_complete: agent produced a 12-row comparison table covering all SKUs
+      4. cause_link_b1: agent links SKU-B1's drop to the supplier change AND/OR packaging issues
+      5. cause_link_f1: agent links SKU-F1's drop to the homepage banner removal
+      6. cause_link_d1: agent either links SKU-D1 to the pack-size survey OR honestly says cause is weakly supported
+      7. action_recommendations: each anomaly has a concrete action (e.g. "switch supplier back / audit packaging", "restore banner / run new campaign", "test multi-pack offering")
+      8. ranked_by_impact: anomalies are ranked by absolute units lost — SKU-F1 is the biggest absolute loss (~76 units/day) and should appear at the top
+    dimensions:
+      - name: all_three_anomalies_caught
+        required: true
+      - name: no_false_positives
+        required: true
+      - name: table_complete
+        required: true
+      - name: cause_link_b1
+        required: true
+      - name: cause_link_f1
+        required: true
+      - name: cause_link_d1
+        required: false
+      - name: action_recommendations
+        required: true
+      - name: ranked_by_impact
+        required: true
+timeout_sec: 600

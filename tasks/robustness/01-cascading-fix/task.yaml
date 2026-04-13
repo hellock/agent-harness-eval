@@ -1,0 +1,52 @@
+id: robustness.01
+category: robustness
+description: Fix a build error where the obvious fix creates a new error, requiring multi-step cascading debugging
+user_query: |
+  This TypeScript project doesn't compile.
+
+  Please:
+  1. run `npx tsc --noEmit` and fix the errors you see
+  2. keep rerunning it until the project passes with zero compile errors
+  3. be careful about cascading issues, because fixing one error may expose the next one
+  4. explain each error you fixed and what changed
+setup:
+  tool_boundary:
+    internet: enabled
+    shell: enabled
+    file_write: enabled
+  prepare_commands:
+    - npm init -y >/dev/null 2>&1
+    - npm install --silent --no-audit --no-fund typescript@5.6.3
+  workspace_dir: workspace
+graders:
+  - type: test_pass
+    command: ./node_modules/.bin/tsc --noEmit 2>&1; exit $?
+  - type: trajectory
+    rule:
+      kind: tool_called
+      tool_pattern: Bash|bash|shell|exec|terminal|execute_code|process
+      min: 2
+  - type: trajectory
+    rule:
+      kind: no_loop
+      max_consecutive_identical: 4
+  - type: rubric_judge
+    rubric: |
+      Evaluate the debugging process:
+      1. Did the agent fix ALL 5 error layers?
+         - Layer 1: Add .js extensions to all imports (3 files)
+         - Layer 2: Rename 'db' to 'database' in loadConfig return
+         - Layer 3: Change config.connectionString to config.url in formatDSN
+         - Layer 4: Change meta?: object to meta?: Record<string, unknown> in ConsoleLogger.log
+         - Layer 5: Remove logger.setLevel(level) call (or add setLevel to ConsoleLogger)
+      2. Did the agent run the compiler multiple times (iterative fix-and-verify)?
+      3. Did the agent explain each error clearly?
+      4. Did the agent avoid unnecessary changes (only fix what's broken)?
+      5. Did `npx tsc --noEmit` pass at the end with zero errors?
+      Score 0.0-1.0. Score 0 if compilation still fails at the end.
+    dimensions:
+      - all_layers_fixed
+      - iterative_verification
+      - explanation_quality
+      - minimal_changes
+timeout_sec: 900

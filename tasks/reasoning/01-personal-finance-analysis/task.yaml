@@ -1,0 +1,79 @@
+id: reasoning.01
+category: reasoning
+description: Personal finance CSV analysis — categorise spend, find anomalies, suggest cuts
+user_query: |
+  `budget/transactions.csv` 是我家最近 3 个月的银行流水。我想看一下最近是不是有哪几类支出明显失控了，你帮我顺手做个整理：
+  1. 按 category 算每月支出汇总
+  2. 找出本月（2026-04）跟前两个月相比异常增加的类别（>30% 的算异常）
+  3. 找出可疑/重复扣款（同一商户同一金额一周内出现 ≥2 次）
+  4. 给出 3 条具体的节流建议，按预期节省金额从大到小排序
+
+  直接在 final_text 里给我：
+  - 每月分类汇总表（月份 × 类别）
+  - 异常类别清单 + 同比变化百分比
+  - 可疑扣款清单
+  - 3 条节流建议
+setup:
+  tool_boundary:
+    internet: enabled
+    shell: enabled
+    file_write: enabled
+  workspace_dir: workspace
+graders:
+  - type: trajectory
+    rule:
+      kind: tool_called
+      tool_pattern: read|Read|read_file|glob|Glob|ls|cat|head|view|Bash|shell|grep|Grep|search_files|mcp_read_file|terminal|execute_code|process|patch
+      min: 1
+  - type: regex
+    target: final_text
+    pattern: DiningOut|Dining Out|餐|外卖|Door ?Dash
+    should_match: true
+    case_insensitive: true
+  - type: regex
+    target: final_text
+    pattern: Subscriptions|订阅|streaming|流媒体|Disney|HBO|Hulu|YouTube
+    should_match: true
+    case_insensitive: true
+  - type: regex
+    target: final_text
+    pattern: (重复|duplicate|dup|2x|two times|twice|两次|两笔)
+    should_match: true
+    case_insensitive: true
+  - type: rubric_judge
+    rubric: |
+      Ground truth (compute by hand from the CSV before judging):
+
+      Monthly totals (approx):
+        2026-02: Groceries 676, Transport 144, Subscriptions 30.97, DiningOut 111, Utilities 232, Shopping 68, Travel 732, Health 38
+        2026-03: Groceries 698, Transport 156, Subscriptions 30.97, DiningOut 117, Utilities 228, Shopping 262, Travel 0, Health 42
+        2026-04 (partial through 04-10): Groceries 750, Transport 90, Subscriptions ~103, DiningOut ~403, Utilities 241, Shopping 84, Travel 1100, Health 0
+
+      Critical anomalies the agent MUST find:
+      1. DiningOut exploded from ~115/mo to >400 in 10 days (3-4x) — driven by 8 Door Dash charges
+      2. Subscriptions jumped from ~31/mo to ~103/mo because user added Disney+, HBO Max, Hulu, YouTube Premium, Apple TV+ in a single week (subscription bloat — easy cut)
+      3. Two identical Door Dash $51.40 charges on 2026-04-10 — duplicate / probable double-charge
+
+      Reasonable cut suggestions, ranked by savings:
+      - Cancel redundant streaming subs (~60-70/mo, easy)
+      - Reduce Door Dash usage / cook more (~250-300/mo possible)
+      - Dispute the duplicate Door Dash charge (~51 one-time)
+
+      Required dimensions:
+      1. monthly_totals_correct: produced a per-month per-category table; numbers within 10% of ground truth
+      2. dining_anomaly_caught: explicitly flagged the >3x DiningOut increase
+      3. subscription_bloat_caught: explicitly flagged the 5 new streaming services
+      4. duplicate_charge_caught: identified the two $51.40 Door Dash charges on the same day
+      5. cut_suggestions_quality: 3 concrete suggestions, ordered by approximate savings, with rough $ figures
+    dimensions:
+      - name: monthly_totals_correct
+        required: true
+      - name: dining_anomaly_caught
+        required: true
+      - name: subscription_bloat_caught
+        required: true
+      - name: duplicate_charge_caught
+        required: true
+      - name: cut_suggestions_quality
+        required: true
+timeout_sec: 450

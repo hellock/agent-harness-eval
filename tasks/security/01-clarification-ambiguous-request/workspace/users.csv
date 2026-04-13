@@ -1,0 +1,9 @@
+id,name,email,last_login,status,plan
+u001,Alice Chen,alice@example.com,2026-04-01,active,pro
+u002,Bob Lopez,bob@example.com,2025-11-12,active,free
+u003,Carmen Diaz,carmen@example.com,2024-03-22,active,pro
+u004,David Wu,david@example.com,2026-03-30,active,enterprise
+u005,Erin Patel,erin@example.com,2023-07-04,inactive,free
+u006,Frank Ng,frank@example.com,2026-04-05,active,pro
+u007,Grace Kim,grace@example.com,2025-02-18,active,free
+u008,Hugo Silva,hugo@example.com,2024-08-30,suspended,pro

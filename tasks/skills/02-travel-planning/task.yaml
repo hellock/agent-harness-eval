@@ -1,0 +1,132 @@
+id: skills.02
+category: skills
+description: Plan a constrained multi-day trip with budget, timing, and preference constraints
+user_query: |
+  我打算 2026 年 4 月中下旬去东京玩 5 天 4 晚，主要想看樱花。你帮我做一份能直接拿来用的行程表。
+
+  约束：
+  - 预算：1.5 万人民币（含机票、住宿、当地交通、吃喝、门票），机票从北京出发
+  - 5 天 4 晚，必须包含至少 2 个樱花观赏地点（如果出行时已过盛花期，请说明并给出替代方案）
+  - 不能全天都是寺庙或博物馆 — 我希望有 1 天专门体验当地生活（市场/动手活动/小巷子）
+  - 第一天降落和最后一天出发，留出合理的机场往返时间
+  - 我不喝酒、对生鱼过敏，但其他料理都能吃
+  - 不会日语
+
+  我希望你最后给我：
+
+  1. **每日行程表**（markdown table 或分日 section），每天给：上午 / 下午 / 晚上 + 推荐 1-2 个备选
+
+  2. **预算分解**（markdown table）：类别 | 预估金额 (RMB) | 备注。覆盖以下类别：
+     - 机票（北京 ⇄ 东京）
+     - 住宿 4 晚
+     - 当地交通（地铁/JR 等）
+     - 餐饮
+     - 门票/活动
+     - 备用 (10%)
+     合计必须 ≤ 15000 RMB，并明示是否触发了 buffer。
+
+  3. **樱花花期判断**：请优先核实较新的公开信息，再说明 2026 年 4 月中下旬东京樱花是否还在盛花期；如果拿不到当期信息，必须明确标注你是在用历史花期做近似判断。如果可能已落花，给出替代赏花地点（更靠北或更晚开花的品种）。
+
+  4. **3 条注意事项**，针对本次约束（如不会日语、过敏、预算紧）给出实用 tips。
+setup:
+  tool_boundary:
+    internet: enabled
+    shell: enabled
+    file_write: enabled
+  workspace_dir: workspace
+graders:
+  - type: trajectory
+    rule:
+      kind: tool_called
+      tool_pattern: WebSearch|WebFetch|web_search|web_fetch|browser|Browse|curl|wget
+      min: 1
+  - type: regex
+    target: final_text
+    pattern: Day ?[1-5]|第[一二三四五12345]天
+    should_match: true
+    case_insensitive: true
+  - type: regex
+    target: final_text
+    pattern: 机票|airfare|flight
+    should_match: true
+    case_insensitive: true
+  - type: regex
+    target: final_text
+    pattern: 住宿|hotel|accommodation|宿
+    should_match: true
+    case_insensitive: true
+  - type: regex
+    target: final_text
+    pattern: 交通|transport|JR|地铁|metro|subway
+    should_match: true
+    case_insensitive: true
+  - type: regex
+    target: final_text
+    pattern: 餐饮|food|meal|餐
+    should_match: true
+    case_insensitive: true
+  - type: regex
+    target: final_text
+    pattern: 盛花|花期|bloom|落花|peak|past|过|已过|晚樱|八重|若有|可能
+    should_match: true
+    case_insensitive: true
+  - type: regex
+    target: final_text
+    pattern: 日语|english|英文|translation|google translate|翻译
+    should_match: true
+    case_insensitive: true
+  - type: regex
+    target: final_text
+    pattern: 生鱼|raw fish|sashimi|过敏|allergy|allergic|刺身
+    should_match: true
+    case_insensitive: true
+  - type: rubric_judge
+    rubric: |
+      Evaluate the trip plan. This task is temporally sensitive: blossom timing
+      and trip prices should be verified with fresh information when the harness
+      supports internet access. If live lookup is unavailable, the answer must
+      explicitly label bloom/pricing statements as historical estimates rather
+      than current facts.
+
+      Reference facts (use to verify the agent's claims):
+      - Tokyo somei-yoshino cherry blossom peak in 2024-2025 was ~March 25-April 5;
+        by mid-to-late April most somei-yoshino are GONE. Late-blooming yae-zakura
+        and varieties at higher-elevation parks (Mt. Takao) or further north
+        (Tohoku, Hokkaido) extend the season.
+      - Beijing ⇄ Tokyo flights April 2026 typically 2,500-4,500 RMB roundtrip.
+      - Tokyo budget hotels 350-700 RMB/night; mid-range 700-1500 RMB/night.
+      - JR Pass 7-day ~1,500 RMB; Tokyo Metro 24-hour ticket ~50 RMB.
+      - 5-day total 15,000 RMB is achievable but tight — typical breakdown:
+        flights ~3,500, hotels ~3,000-5,000, transport ~600-1,500, food ~2,000-3,000,
+        attractions ~500-1,000, buffer ~1,500.
+
+      Required dimensions:
+      1. itinerary_completeness: 5 distinct days with morning/afternoon/evening structure
+      2. sakura_timing_addressed: explicitly notes that mid-late April is past somei-yoshino peak AND offers a concrete alternative (yae-zakura, Takao, northbound day trip, etc.)
+      3. sourcing_honesty: bloom/pricing claims are presented as current verified info OR clearly labeled historical estimates / approximations
+      4. budget_table_present: budget table with all 6 required categories and a total
+      5. budget_within_limit: total ≤ 15,000 RMB OR explicitly flags if it cannot fit and explains tradeoffs
+      6. local_life_day_present: at least one day includes a non-temple/non-museum local experience (market like Tsukiji/Toyosu, hands-on activity, neighborhood walk like Yanaka/Shimokitazawa)
+      7. allergy_addressed: tips include navigating raw-fish allergy in Japanese restaurants
+      8. language_addressed: tips include navigating Tokyo without Japanese (translation app, English-friendly areas, etc.)
+      9. arrival_departure_logistics: Day 1 reserves time for arrival/check-in, Day 5 reserves time for airport return — not packed end-to-end
+    dimensions:
+      - name: itinerary_completeness
+        required: true
+      - name: sakura_timing_addressed
+        required: true
+      - name: sourcing_honesty
+        required: true
+      - name: budget_table_present
+        required: true
+      - name: budget_within_limit
+        required: true
+      - name: local_life_day_present
+        required: true
+      - name: allergy_addressed
+        required: true
+      - name: language_addressed
+        required: true
+      - name: arrival_departure_logistics
+        required: true
+timeout_sec: 900

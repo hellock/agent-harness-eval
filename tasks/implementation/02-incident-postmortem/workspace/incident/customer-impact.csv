@@ -1,0 +1,9 @@
+customer_id,name,plan,impact_minutes,failed_orders,est_revenue_loss_usd
+c-101,Acme Corp,enterprise,32,128,12400
+c-102,GoodFoods,enterprise,32,86,8200
+c-118,Quickship,pro,28,41,2900
+c-201,SmallBiz Hub,starter,30,12,310
+c-219,Linh Studio,starter,29,3,84
+c-301,Northwind,enterprise,32,72,5800
+c-402,UrbanRetail,pro,30,22,1640
+c-501,GreenLeaf,pro,28,18,1280

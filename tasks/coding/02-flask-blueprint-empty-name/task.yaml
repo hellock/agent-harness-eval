@@ -1,0 +1,57 @@
+id: coding.02
+category: coding
+description: "SWE-bench flask#5014: Blueprint should reject empty name"
+user_query: |
+  The `Blueprint` class in `src/flask/blueprints.py` currently accepts an empty
+  string as the `name` argument, but this causes downstream routing failures
+  (see GitHub issue pallets/flask#4944).
+
+  Fix `Blueprint.__init__` so that passing an empty `name` raises a `ValueError`.
+  A test case `tests/test_blueprints.py::test_empty_name_not_allowed` already
+  exists in the workspace — your fix must make it pass without breaking the
+  existing tests.
+setup:
+  workspace_dir: workspace
+  prepare_commands:
+    - git clone --depth=1 https://github.com/pallets/flask.git repo
+    - cd repo && git fetch origin 7ee9ceb71e868944a46e1ff00b506772a53a4f1d --depth=1 && git checkout FETCH_HEAD
+    - python3 apply_test.py
+    - cd repo && python3 -m venv .venv && .venv/bin/python -m pip install -e . "werkzeug<3" pytest -q 2>&1 | tail -1
+  tool_boundary:
+    internet: enabled
+    shell: enabled
+    file_write: enabled
+graders:
+  - type: test_suite
+    working_dir: repo
+    setup_commands:
+      - rm -rf .grader-venv && python3 -m venv .grader-venv && .grader-venv/bin/python -m pip install -e . "werkzeug<3" pytest -q
+    cases:
+      - name: tests/test_blueprints.py::test_empty_name_not_allowed
+        command: .grader-venv/bin/python -m pytest tests/test_blueprints.py::test_empty_name_not_allowed -x --tb=short
+      - name: tests/test_blueprints.py::test_dotted_name_not_allowed
+        command: .grader-venv/bin/python -m pytest tests/test_blueprints.py::test_dotted_name_not_allowed -x --tb=short
+      - name: tests/test_blueprints.py::test_blueprint_specific_error_handling
+        command: .grader-venv/bin/python -m pytest tests/test_blueprints.py::test_blueprint_specific_error_handling -x --tb=short
+    pass_threshold: 1.0
+  - type: trajectory
+    rule:
+      kind: tool_called
+      tool_pattern: read|Read|read_file|search_files|terminal|execute_code|Bash|shell|patch|mcp_read_file
+      min: 1
+  - type: rubric_judge
+    rubric: |
+      The agent should:
+      1. Read the existing Blueprint.__init__ code in src/flask/blueprints.py
+      2. Identify that there's already a check for '.' in the name but no check for empty string
+      3. Add a ValueError check for empty name (e.g., `if not name: raise ValueError(...)`)
+      4. Verify the fix passes the test
+
+      The correct fix is approximately 2-3 lines: check `if not name` before or near the existing
+      dot check, and raise ValueError with a descriptive message.
+    dimensions:
+      - name: correct_fix
+        required: true
+      - name: minimal_change
+        required: false
+timeout_sec: 600

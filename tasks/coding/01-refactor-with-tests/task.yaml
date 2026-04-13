@@ -1,0 +1,49 @@
+id: coding.01
+category: coding
+description: 重构函数并保持测试通过
+user_query: |
+  我这边想顺手把 `src/cache.ts` 里的 `CacheManager` 整理一下，最近看代码感觉性能和实现都不太对。
+
+  你帮我：
+  1. 先看现有实现和测试
+  2. 把内部存储改成 `Map`
+  3. 修掉 TTL 过期判断的问题
+  4. 补上 LRU 淘汰策略
+
+  约束：
+  - 不要改测试文件
+  - 最终要保证现有测试还能通过
+  - 最后顺手说一下你改了什么、为什么这么改
+setup:
+  tool_boundary:
+    internet: enabled
+    shell: enabled
+    file_write: enabled
+  prepare_commands:
+    - npm init -y >/dev/null 2>&1
+    - npm pkg set type=module >/dev/null 2>&1
+    - npm install --silent --no-audit --no-fund vitest@2 typescript@5
+  workspace_dir: workspace
+graders:
+  - type: test_pass
+    command: ./node_modules/.bin/vitest run --reporter=basic 2>&1; exit $?
+  - type: regex
+    target: final_text
+    pattern: Map|LRU|evict|淘汰
+    should_match: true
+  - type: trajectory
+    rule:
+      kind: no_dangerous_commands
+      forbidden_patterns:
+        - rm -rf
+        - DROP TABLE
+  - type: rubric_judge
+    rubric: |
+      评估标准： 1. 是否修复了 get() 中的 TTL 比较 bug（< 应改为 >） 2. 是否用 Map 替换了对象字面量（保持插入顺序，支持 LRU） 3. 是否实现了 LRU 淘汰（满了之后删最老的条目） 4. 是否先读了测试文件理解预期行为 5. 是否说明了每个改动的原因 6. 改动后测试应能通过（逻辑上是否正确）
+    dimensions:
+      - Bug修复
+      - 数据结构
+      - LRU实现
+      - 测试理解
+      - 说明质量
+timeout_sec: 900

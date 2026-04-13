@@ -1,0 +1,163 @@
+id: implementation.01
+category: implementation
+description: Rename an API function across 8 interconnected files maintaining consistency in types, imports, tests, and docs
+user_query: |
+  I want to rename `getUserById` to `findUser` across the whole project.
+
+  Please update every place that references it, including:
+  - the function definition
+  - call sites
+  - type definitions (note: the return type is named `GetUserByIdResult`
+    after the function — rename it to `FindUserResult` so the naming
+    stays consistent)
+  - tests (including mock variable names like `mockGetUserById`)
+  - re-exports
+  - docs
+
+  Keep this as a pure rename only. No behavior changes.
+  At the end, show me which files you changed.
+setup:
+  tool_boundary:
+    internet: enabled
+    shell: enabled
+    file_write: enabled
+  workspace_dir: workspace
+graders:
+  - type: regex
+    target: artifact
+    artifact_path: src/db/queries.ts
+    pattern: findUser
+    should_match: true
+    case_insensitive: true
+  - type: regex
+    target: artifact
+    artifact_path: src/db/queries.ts
+    pattern: getUserById(?!Result)
+    should_match: false
+    case_insensitive: true
+  - type: regex
+    target: artifact
+    artifact_path: tests/user-service.test.ts
+    pattern: findUser
+    should_match: true
+    case_insensitive: true
+  - type: regex
+    target: artifact
+    artifact_path: src/index.ts
+    pattern: findUser
+    should_match: true
+    case_insensitive: true
+  - type: regex
+    target: artifact
+    artifact_path: src/index.ts
+    pattern: getUserById(?!Result)
+    should_match: false
+    case_insensitive: true
+  - type: regex
+    target: artifact
+    artifact_path: src/services/user-service.ts
+    pattern: findUser
+    should_match: true
+    case_insensitive: true
+  - type: regex
+    target: artifact
+    artifact_path: src/services/user-service.ts
+    pattern: getUserById(?!Result)
+    should_match: false
+    case_insensitive: true
+  - type: regex
+    target: artifact
+    artifact_path: src/routes/users.ts
+    pattern: findUser
+    should_match: true
+    case_insensitive: true
+  - type: regex
+    target: artifact
+    artifact_path: src/routes/users.ts
+    pattern: getUserById(?!Result)
+    should_match: false
+    case_insensitive: true
+  - type: regex
+    target: artifact
+    artifact_path: src/middleware/auth.ts
+    pattern: findUser
+    should_match: true
+    case_insensitive: true
+  - type: regex
+    target: artifact
+    artifact_path: src/middleware/auth.ts
+    pattern: getUserById(?!Result)
+    should_match: false
+    case_insensitive: true
+  - type: regex
+    target: artifact
+    artifact_path: src/models/user.ts
+    pattern: getUserById(?!Result)
+    should_match: false
+    case_insensitive: true
+  - type: regex
+    target: artifact
+    artifact_path: tests/user-service.test.ts
+    pattern: getUserById(?!Result)
+    should_match: false
+    case_insensitive: true
+  - type: regex
+    target: artifact
+    artifact_path: docs/API.md
+    pattern: findUser
+    should_match: true
+    case_insensitive: true
+  - type: regex
+    target: artifact
+    artifact_path: docs/API.md
+    pattern: getUserById(?!Result)
+    should_match: false
+    case_insensitive: true
+  - type: regex
+    target: artifact
+    artifact_path: src/models/user.ts
+    pattern: GetUserByIdResult
+    should_match: false
+  - type: regex
+    target: artifact
+    artifact_path: src/db/queries.ts
+    pattern: GetUserByIdResult
+    should_match: false
+  - type: regex
+    target: artifact
+    artifact_path: src/index.ts
+    pattern: GetUserByIdResult
+    should_match: false
+  - type: regex
+    target: artifact
+    artifact_path: docs/API.md
+    pattern: GetUserByIdResult
+    should_match: false
+  - type: trajectory
+    rule:
+      kind: no_dangerous_commands
+      forbidden_patterns:
+        - rm -rf
+        - DROP TABLE
+  - type: rubric_judge
+    rubric: |
+      Evaluate the completeness and consistency of the rename from getUserById to findUser:
+      1. Function definition renamed in src/db/queries.ts?
+      2. Type GetUserByIdResult renamed to FindUserResult (or similar) in src/models/user.ts?
+      3. Interface method renamed in UserRepository?
+      4. All imports updated in: user-service.ts, routes/users.ts, middleware/auth.ts, index.ts?
+      5. All call sites updated (not just imports)?
+      6. Test file: mock name, import, variable name all updated?
+      7. Documentation in docs/API.md updated?
+      8. JSDoc comment in queries.ts updated?
+      9. Re-export in src/index.ts updated?
+      10. No logic changes — ONLY renames?
+      Score 0.0-1.0. Deduct 0.1 per missed location. Score 0 if any getUserById reference remains.
+    dimensions:
+      - definition_rename
+      - type_rename
+      - import_update_completeness
+      - test_update
+      - doc_update
+      - no_logic_change
+timeout_sec: 900

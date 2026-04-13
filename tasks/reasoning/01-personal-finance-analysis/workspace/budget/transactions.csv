@@ -1,0 +1,69 @@
+date,merchant,category,amount
+2026-02-01,Whole Foods,Groceries,182.45
+2026-02-02,Shell Gas,Transport,52.10
+2026-02-03,Netflix,Subscriptions,15.99
+2026-02-04,Trader Joes,Groceries,94.32
+2026-02-06,Starbucks,DiningOut,6.75
+2026-02-07,Sweetgreen,DiningOut,18.40
+2026-02-08,PG&E,Utilities,142.00
+2026-02-09,Comcast,Utilities,89.99
+2026-02-10,Amazon,Shopping,68.20
+2026-02-12,Uber,Transport,24.50
+2026-02-13,Spotify,Subscriptions,11.99
+2026-02-14,Olive Garden,DiningOut,86.40
+2026-02-15,Costco,Groceries,243.18
+2026-02-17,Shell Gas,Transport,48.30
+2026-02-19,Apple iCloud,Subscriptions,2.99
+2026-02-20,CVS Pharmacy,Health,38.40
+2026-02-22,Whole Foods,Groceries,156.20
+2026-02-25,United Airlines,Travel,420.00
+2026-02-26,Marriott,Travel,312.00
+2026-02-28,Uber,Transport,19.80
+2026-03-01,Whole Foods,Groceries,176.50
+2026-03-02,Shell Gas,Transport,55.20
+2026-03-03,Netflix,Subscriptions,15.99
+2026-03-05,Trader Joes,Groceries,102.10
+2026-03-06,Starbucks,DiningOut,7.20
+2026-03-08,Sweetgreen,DiningOut,17.80
+2026-03-09,PG&E,Utilities,138.50
+2026-03-10,Comcast,Utilities,89.99
+2026-03-11,Amazon,Shopping,72.40
+2026-03-13,Uber,Transport,28.10
+2026-03-13,Spotify,Subscriptions,11.99
+2026-03-15,Costco,Groceries,251.20
+2026-03-16,Olive Garden,DiningOut,92.30
+2026-03-18,Shell Gas,Transport,51.40
+2026-03-19,Apple iCloud,Subscriptions,2.99
+2026-03-21,Whole Foods,Groceries,168.30
+2026-03-23,CVS Pharmacy,Health,42.10
+2026-03-25,Best Buy,Shopping,189.99
+2026-03-28,Uber,Transport,22.30
+2026-04-01,Whole Foods,Groceries,191.20
+2026-04-02,Shell Gas,Transport,58.40
+2026-04-02,Netflix,Subscriptions,15.99
+2026-04-03,Door Dash,DiningOut,42.80
+2026-04-03,Door Dash,DiningOut,38.50
+2026-04-04,Door Dash,DiningOut,46.20
+2026-04-04,Trader Joes,Groceries,118.40
+2026-04-05,Door Dash,DiningOut,52.10
+2026-04-05,Starbucks,DiningOut,8.40
+2026-04-06,Door Dash,DiningOut,44.80
+2026-04-06,Disney+,Subscriptions,13.99
+2026-04-07,HBO Max,Subscriptions,15.99
+2026-04-07,Hulu,Subscriptions,17.99
+2026-04-07,YouTube Premium,Subscriptions,13.99
+2026-04-07,Apple TV+,Subscriptions,9.99
+2026-04-07,Door Dash,DiningOut,49.30
+2026-04-08,Sweetgreen,DiningOut,18.20
+2026-04-08,PG&E,Utilities,151.00
+2026-04-08,Comcast,Utilities,89.99
+2026-04-08,Spotify,Subscriptions,11.99
+2026-04-09,Amazon,Shopping,84.50
+2026-04-09,Apple iCloud,Subscriptions,2.99
+2026-04-09,Costco,Groceries,278.40
+2026-04-09,Whole Foods,Groceries,162.10
+2026-04-09,United Airlines,Travel,612.00
+2026-04-09,Marriott,Travel,488.00
+2026-04-10,Uber,Transport,31.20
+2026-04-10,Door Dash,DiningOut,51.40
+2026-04-10,Door Dash,DiningOut,51.40

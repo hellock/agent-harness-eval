@@ -1,0 +1,109 @@
+# ─── Agent Harness Evaluation Config ───
+# cp eval.yaml.example eval.yaml
+
+# ─── Provider Config (Non-secret) ───
+# Put relay / proxy base_url, protocol format, and extra headers here.
+# API keys should still live in .env.
+# providers:
+#   relay:
+#     base_url: https://your-relay.example.com
+#     # api_format options:
+#     #   anthropic        — /v1/messages (Anthropic Messages API)
+#     #   openai-chat-completions — /v1/chat/completions (OpenAI Chat Completions)
+#     #   openai-responses — /v1/responses (OpenAI Responses API, required by codex)
+#     api_format: anthropic
+#     headers:
+#       x-relay-org: your-org
+
+# ─── Model selection ───
+# provider + model are separate fields. The provider names a configured
+# provider entry (or a well-known default like anthropic / openai).
+provider: anthropic
+model: claude-sonnet-4-6
+
+# Multi-model matrix (replaces top-level provider/model):
+# models:
+#   - provider: anthropic
+#     model: claude-sonnet-4-6
+#   - provider: openai
+#     model: gpt-5.4
+
+# Judge model (object with provider + model):
+judge_model:
+  provider: anthropic
+  model: claude-sonnet-4-6
+
+# Runtime settings
+executor: host                 # required: host or docker
+concurrency: 1                 # max concurrent tasks
+runs: 1                        # runs per task
+timeout: 600                   # per-task timeout in seconds
+
+# ─── Harness Config ───
+# Each harness can specify:
+#   version       — recorded version string
+#   provider      — override the default provider for this harness
+#                   (e.g. codex needs openai-responses, claude-code needs anthropic)
+#   docker_image  — container image for docker sandbox mode
+#                   (nanobot defaults to a managed baked image; others default to language base images)
+#
+# Task-level setup (prepare_commands in task.yaml) runs inside the container
+# before the agent starts, so the image must include the tools those commands need.
+harnesses:
+  openclaw:
+    version: "2026.4.5"
+    # docker_image: "node:22-slim"
+
+  claude_code:                # YAML key uses underscore; CLI uses claude-code
+    version: "2.1.92"
+    # provider: anthropic     # default — override if using a relay
+    # docker_image: "node:22-slim"
+
+  nanobot:
+    version: "0.1.5"
+    # docker_image: "agent-harness-eval-nanobot:0.1.5"
+
+  zeroclaw:
+    version: "0.6.8"
+    # docker_image: "rust:1-slim"
+
+  hermes:
+    version: "0.8.0"
+    tag: "v2026.4.8"
+    # docker_image: "python:3.12-slim"
+
+  codex:
+    version: "0.118.0"
+    # provider: relay_responses  # requires openai-responses api_format
+    # docker_image: "node:22-slim"
+
+# ─── Per-harness provider override example ───
+# Use this to run claude-code + codex on the SAME model via different
+# relay endpoints (each exposing a different wire protocol):
+#
+# providers:
+#   relay_anthropic:
+#     base_url: https://relay.example.com/anthropic
+#     api_format: anthropic
+#   relay_responses:
+#     base_url: https://relay.example.com/openai
+#     api_format: openai-responses
+#
+# provider: relay_anthropic
+# model: claude-sonnet-4-6
+#
+# harnesses:
+#   claude_code:
+#     version: "2.1.92"
+#     # uses default provider (relay_anthropic) — no override needed
+#   codex:
+#     version: "0.118.0"
+#     provider: relay_responses    # override to openai-responses endpoint
+
+# ─── Model Pricing (USD / million tokens) ───
+# Omit to use built-in defaults (currently Claude Sonnet 4.6)
+# pricing:
+#   input: 3
+#   output: 15
+#   cache_read: 0.30
+#   cache_write: 3.75

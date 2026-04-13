@@ -1,0 +1,93 @@
+[project]
+name = "agent-harness-eval"
+version = "0.1.0"
+description = "Evaluation framework for objectively comparing different AI agent harnesses"
+readme = "README.md"
+license = "MIT"
+authors = [
+    { name = "Kai Chen" },
+]
+requires-python = ">=3.12"
+keywords = ["agents", "evaluation", "benchmark", "llm", "harness"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Testing",
+]
+dependencies = [
+    "pyyaml>=6.0",
+    "httpx>=0.28",
+    "jsonschema>=4.26.0",
+    "python-dotenv>=1.2.2",
+    "tenacity>=9.1.4",
+]
+
+[project.urls]
+Homepage = "https://github.com/hellock/agent-harness-eval"
+Repository = "https://github.com/hellock/agent-harness-eval"
+Issues = "https://github.com/hellock/agent-harness-eval/issues"
+
+[project.scripts]
+agent-harness-eval = "agent_harness_eval.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agent_harness_eval"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "pre-commit>=4.5.1",
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.15.10",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",     # pycodestyle errors
+    "W",     # pycodestyle warnings
+    "F",     # pyflakes
+    "I",     # isort
+    "UP",    # pyupgrade
+    "B",     # flake8-bugbear
+    "SIM",   # flake8-simplify
+    "TCH",   # flake8-type-checking
+    "RUF",   # ruff-specific
+]
+ignore = [
+    "E501",   # line too long — not enforced globally; long shell/report literals are common
+    "SIM108", # ternary operator — not always clearer
+    "SIM105", # suppressible-exception — contextlib.suppress not always clearer
+    "B027",   # empty method without abstract — intentional default no-ops
+    "UP047",  # non-pep695 generic — 3.12 syntax not yet widespread
+    "TC001",  # typing-only first-party import — moves imports behind TYPE_CHECKING, hurts readability
+    "TC003",  # typing-only stdlib import — same as above
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["B010"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["agent_harness_eval"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"

@@ -1,0 +1,46 @@
+id: memory.02
+category: memory
+description: "Recall two previously stored project facts without conversation replay"
+user_query: |
+  上次我让你记过两个固定信息，现在直接帮我确认一下：
+  1. 项目代号是什么？
+  2. 每周固定在哪天复盘？
+
+  不用解释，直接用一句中文回答就行。
+setup:
+  native_memory:
+    memory_dir: memory
+  tool_boundary:
+    internet: disabled
+    shell: enabled
+    file_write: disabled
+graders:
+  - type: regex
+    target: final_text
+    pattern: "Kestrel"
+    should_match: true
+    case_insensitive: false
+  - type: regex
+    target: final_text
+    pattern: "周四|Thursday"
+    should_match: true
+    case_insensitive: true
+  - type: rubric_judge
+    rubric: |
+      The answer must rely on native memory only. No conversation_history is
+      provided. Ground truth from pre-seeded MEMORY.md:
+
+      - Project codename: Kestrel
+      - Weekly review day: Thursday / 周四
+
+      Required dimensions:
+      1. recalls_codename: explicitly states Kestrel as the project codename
+      2. recalls_review_day: explicitly states Thursday / 周四 as the fixed review day
+      3. concise_single_sentence: answer stays concise and does not turn into a long explanation
+      4. no_hallucinated_details: does not invent extra project facts, dates, owners, or constraints
+    dimensions:
+      - { name: "recalls_codename", required: true }
+      - { name: "recalls_review_day", required: true }
+      - { name: "concise_single_sentence", required: true }
+      - { name: "no_hallucinated_details", required: true }
+timeout_sec: 300

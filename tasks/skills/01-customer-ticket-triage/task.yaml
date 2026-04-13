@@ -1,0 +1,70 @@
+id: skills.01
+category: skills
+description: Customer support triage — classify tickets, identify P0, draft replies
+user_query: |
+  `tickets/` 目录里是今天还没分拣的 8 张客服工单。你先帮我做一轮初步 triage：
+  1. 把每张工单按类型分类（billing / auth / performance / data_loss / other）
+  2. 标出严重等级（P0 立刻处理 / P1 当天 / P2 本周 / P3 之后）
+  3. 给最高优先级的 2 张工单各起草一份回复邮件，保存到 replies/ 目录（文件名格式：reply-<ticket-id>.md）
+  4. 在 final_text 中输出一个汇总表格：ticket_id | category | severity | owner_team
+
+  分类规则：
+  - 涉及金钱、付款、订阅 → billing
+  - 涉及登录、密码、token → auth
+  - 涉及慢、超时、加载 → performance
+  - 涉及数据丢失、内容消失 → data_loss
+  - 其他 → other
+
+  路由规则：
+  - billing → finance-team
+  - auth → identity-team
+  - performance / data_loss → platform-team
+  - other → success-team
+
+  P0 判定：data_loss 类一律 P0；其它类如果用户明确说"现在完全用不了/影响营收"也算 P0。
+setup:
+  tool_boundary:
+    internet: enabled
+    shell: enabled
+    file_write: enabled
+  workspace_dir: workspace
+graders:
+  - type: test_pass
+    command: test $(ls replies/reply-*.md 2>/dev/null | wc -l) -ge 2
+  - type: trajectory
+    rule:
+      kind: tool_called
+      tool_pattern: read|Read|read_file|glob|Glob|ls|cat|head|view|Bash|shell|grep|Grep|search_files|mcp_read_file|terminal|execute_code|process|patch
+      min: 4
+  - type: rubric_judge
+    rubric: |
+      Evaluate the triage quality.
+
+      Ground truth classification (use as reference):
+        T-1042: auth     P0  (whole team blocked, quarterly close, $50k/hr revenue impact → escalated to P0)
+        T-1043: billing  P2-P3  (no rush, before next cycle)
+        T-1044: performance  P1-P2  (degraded, used daily, not life-or-death)
+        T-1045: data_loss   P0  (data_loss is always P0; board meeting Friday)
+        T-1046: other       P3  (feature question)
+        T-1047: billing     P1  (active money problem, possible double-charge)
+        T-1048: auth        P0 or P1  (sole admin locked out — defensible as P0 because team is blocked)
+        T-1049: other       P3  (feature request)
+
+      Required dimensions:
+      1. category_accuracy: at least 7 of 8 tickets correctly categorized
+      2. severity_accuracy: T-1045 is marked P0; T-1042 is marked P0 or P1; feature requests (T-1046, T-1049) are P3
+      3. routing_accuracy: T-1042 → identity-team; T-1043 → finance-team; T-1044 → platform-team; T-1045 → platform-team; T-1047 → finance-team
+      4. p0_replies: the agent picked 2 P0 (or near-P0) tickets and drafted reply files at replies/reply-<id>.md; reply content acknowledges the customer's specific issue (not a template)
+      5. summary_table: final_text contains a clear table with all 8 tickets and the 4 columns
+    dimensions:
+      - name: category_accuracy
+        required: true
+      - name: severity_accuracy
+        required: true
+      - name: routing_accuracy
+        required: true
+      - name: p0_replies_drafted
+        required: true
+      - name: summary_table
+        required: true
+timeout_sec: 600

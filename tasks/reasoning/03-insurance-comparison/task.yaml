@@ -1,0 +1,93 @@
+id: reasoning.03
+category: reasoning
+description: Compare three health insurance plans against a family's specific constraints and recommend
+user_query: |
+  `plans/` 目录里有三份健康险方案摘要（plan-bronze, plan-silver, plan-gold）。我想给家里选一个最合适的，你先按我们的实际情况帮我对比一下：
+  - 我和配偶 + 两个孩子（4 岁和 7 岁）
+  - 配偶有 2 型糖尿病，每月需要胰岛素和验血
+  - 大孩子有哮喘，每年要看 2-3 次专科 + 偶尔急诊
+  - 我们偏好原 PCP 和儿科医生，他们都在 BlueNet 网络
+  - 月预算上限：800 美元（保费）
+  - 不愿意接受任何 deductible 高于 5000 的方案
+  - 慢病用药每月不超过 100 美元自付
+
+  请帮我把三个方案按适合程度排个序（best fit 优先），并说清楚理由。每个方案至少指出 1 个对我们家不利的点。
+  最后也直接告诉我最不适合的是哪个，为什么。
+
+  直接在 final_text 里输出对比表格 + 推荐 + 理由。
+setup:
+  tool_boundary:
+    internet: enabled
+    shell: enabled
+    file_write: enabled
+  workspace_dir: workspace
+graders:
+  - type: trajectory
+    rule:
+      kind: tool_called
+      tool_pattern: read|Read|read_file|glob|Glob|ls|cat|head|view|Bash|shell|grep|Grep|search_files|mcp_read_file|terminal|execute_code|process|patch
+      min: 2
+  - type: regex
+    target: final_text
+    pattern: Silver|silver|银
+    should_match: true
+  - type: regex
+    target: final_text
+    pattern: Bronze|bronze|铜
+    should_match: true
+  - type: regex
+    target: final_text
+    pattern: Gold|gold|金
+    should_match: true
+  - type: rubric_judge
+    rubric: |
+      Ground truth analysis (compute carefully before judging):
+
+      Bronze ($620/mo, deductible $7,500):
+        - Premium fits budget ✓
+        - Deductible $7,500 EXCEEDS the user's $5,000 hard limit ✗ (disqualifying)
+        - Insulin $120/mo > user's $100/mo cap ✗
+        - Plus has $500 drug deductible
+        - No chronic disease program — bad for diabetes + asthma family
+        - Verdict: WORST fit. The deductible alone disqualifies it before cost analysis.
+
+      Silver ($780/mo, deductible $4,000):
+        - Premium $780 < $800 budget ✓ (just barely fits)
+        - Deductible $4,000 < $5,000 ✓
+        - Insulin $60/mo < $100/mo ✓
+        - BlueNet full network — keeps current PCP and pediatrician ✓
+        - Chronic disease program with diabetes + asthma support — directly matches both family conditions ✓
+        - No specialist referral required (good for asthma specialist visits)
+        - Verdict: BEST fit. Directly matches almost every constraint.
+
+      Gold ($1,150/mo, deductible $1,000):
+        - Premium $1,150 EXCEEDS $800 budget by $350/mo (≈ $4,200/yr) ✗
+        - Network is GoldNet only — current BlueNet PCP and pediatrician are OUT-OF-NETWORK ✗ (must switch doctors or pay 60% reimbursement)
+        - Other terms are great (low deductible, low copays)
+        - Verdict: Better-than-Silver coverage but TWO major mismatches (budget + network).
+        - Should rank SECOND-best behind Silver, NOT best, because the user's stated constraints rule it out.
+
+      Required dimensions:
+      1. ranking_correct: Silver is #1, Bronze is worst (#3). Gold is #2.
+      2. bronze_deductible_disqualified: agent explicitly notes Bronze's $7,500 deductible exceeds the $5,000 cap
+      3. gold_network_caught: agent explicitly notes Gold uses GoldNet, not BlueNet, so the family's current doctors are out-of-network
+      4. gold_budget_caught: agent explicitly notes Gold $1,150 exceeds the $800/mo budget
+      5. silver_chronic_match: agent calls out that Silver's chronic disease program directly serves both diabetes and asthma
+      6. one_negative_per_plan: every plan has at least one downside listed for the family
+      7. comparison_table_present: the answer has a structured comparison table covering premium, deductible, network, insulin cost
+    dimensions:
+      - name: ranking_correct
+        required: true
+      - name: bronze_deductible_disqualified
+        required: true
+      - name: gold_network_caught
+        required: true
+      - name: gold_budget_caught
+        required: true
+      - name: silver_chronic_match
+        required: true
+      - name: one_negative_per_plan
+        required: true
+      - name: comparison_table_present
+        required: true
+timeout_sec: 450
