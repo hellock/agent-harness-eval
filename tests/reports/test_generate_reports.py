@@ -104,11 +104,15 @@ def test_generate_reports_single_model_writes_expected_files_and_summary_metadat
     assert "| Codex" in summary and "| 0.118.0" in summary
     assert "| Zeroclaw" in summary and "| 0.6.8" in summary
     assert "**Judge model:** `anthropic:claude-sonnet-4-6`" in summary
+    assert "**Preflight:**" not in summary
     assert "Mean Time" in summary
-    assert "2.0s" in summary
-    assert "## Category Breakdown" in summary
-    assert "## Failure Taxonomy" in summary
-    assert "## Judge Analysis" in summary
+    assert "| Codex    | 100.0%    | 0.00        | 2.0s      | 1.2k" in summary
+    assert "$0.1200" in summary
+    assert "| 3.0        | 0.0%     |" in summary
+    assert "## 3. Failures" in summary
+    assert "## 4. Category Breakdown" in summary
+    assert "## 5. Judge Summary" not in summary
+    assert "## 6. Detailed Reports" in summary
 
 
 def test_generate_reports_skips_judge_analysis_without_judge_model(
@@ -132,4 +136,4 @@ def test_generate_reports_skips_judge_analysis_without_judge_model(
 
     assert (output_dir / "reports" / "summary.md").is_file()
     summary = (output_dir / "reports" / "summary.md").read_text(encoding="utf-8")
-    assert "## Judge Analysis" not in summary
+    assert "## 5. Judge Summary" not in summary

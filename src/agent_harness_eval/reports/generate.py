@@ -11,10 +11,8 @@ from ..metrics import HarnessMetrics, compute_harness_metrics
 from ..task import Task
 from ..types import EvalConfig, RunResult
 from .case_review import generate_case_review_report
-from .category_breakdown import generate_category_report
 from .failure_taxonomy import generate_failure_report
 from .formatting import format_harness_name, format_task_count_label, markdown_table
-from .judge_analysis import generate_judge_analysis_report
 from .summary import generate_summary_report
 
 
@@ -85,21 +83,7 @@ def generate_reports(
             tasks,
             harness_versions=harness_versions,
             executor_backend=executor_backend,
-        )
-        judge_label = config.judge_model_spec.label if config.judge_model_spec else None
-        judge_report = None
-        if judge_label:
-            judge_report = generate_judge_analysis_report(
-                results,
-                tasks,
-                judge_label,
-            )
-        summary_md = _append_embedded_sections(
-            summary_md,
-            preflight_summary=_generate_preflight_summary(output_dir),
-            category_report=generate_category_report(results, tasks, config),
-            failure_report=generate_failure_report(results),
-            judge_report=judge_report,
+            preflight_summary=_describe_preflight(output_dir),
         )
         _write_report_files(
             reports_dir,
@@ -239,6 +223,29 @@ def _generate_preflight_summary(output_dir: str) -> str | None:
         stage_summary = ", ".join(f"{stage}={count}" for stage, count in sorted(stage_counts.items()))
         lines.append(f"- **Failure stages:** {stage_summary}")
     return "\n".join(lines)
+
+
+def _describe_preflight(output_dir: str) -> str | None:
+    path = os.path.join(output_dir, "data", "preflight.json")
+    if not os.path.exists(path):
+        return None
+
+    with open(path) as f:
+        rows = json.load(f)
+
+    if not rows:
+        return None
+
+    failed = [row for row in rows if row.get("status") != "passed"]
+    if not failed:
+        return "passed"
+
+    stage_counts: dict[str, int] = {}
+    for row in failed:
+        stage = str(row.get("stage") or "unknown")
+        stage_counts[stage] = stage_counts.get(stage, 0) + 1
+    stage_summary = ", ".join(f"{stage}={count}" for stage, count in sorted(stage_counts.items()))
+    return f"{len(failed)} failure(s) ({stage_summary})"
 
 
 def _write_manifest(

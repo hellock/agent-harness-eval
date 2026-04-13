@@ -4,12 +4,9 @@ from __future__ import annotations
 
 from collections import defaultdict
 
-from ..metrics import HarnessMetrics
+from ..metrics import HarnessMetrics, compute_category_metrics, is_not_applicable_run
 from ..task import Task
-from ..types import (
-    EvalConfig,
-    RunResult,
-)
+from ..types import EvalConfig, RunResult
 from .formatting import (
     format_cost_cell,
     format_harness_name,
@@ -29,63 +26,59 @@ def generate_summary_report(
     *,
     harness_versions: dict[str, str] | None = None,
     executor_backend: str = "host",
+    preflight_summary: str | None = None,
 ) -> str:
-    """Generate the summary report.
-
-    Structure:
-      1. Evaluation Setup
-      2. Results
-      3. Analysis
-      4. Appendix (links to detail reports)
-    """
+    """Generate the main summary report."""
     lines: list[str] = []
-
-    # ── 1. Evaluation Setup ──
-    lines.extend(_section_setup(config, tasks, metrics, harness_versions, executor_backend))
-
-    # ── 2. Results ──
+    lines.extend(_section_setup(config, tasks, harness_versions, executor_backend, preflight_summary))
     lines.extend(_section_results(metrics, results, config))
 
-    # ── 3. Analysis ──
     if results and metrics:
-        lines.extend(_section_analysis(metrics, results))
+        lines.extend(_section_failures(metrics, results))
+        if tasks:
+            lines.extend(_section_category_breakdown(metrics, results, tasks))
+        if config.judge_model_spec:
+            lines.extend(_section_judge_summary(results, config.judge_model_spec.label))
 
+    lines.extend(
+        [
+            "## 6. Detailed Reports",
+            "",
+            "- Case review: `reports/case-review.md`",
+            "- Machine-readable results: `data/runs.jsonl`",
+            "- Metrics: `data/metrics.json`",
+            "",
+        ]
+    )
     return "\n".join(lines)
-
-
-# ─── Section builders ───
 
 
 def _section_setup(
     config: EvalConfig,
     tasks: list[Task] | None,
-    metrics: list[HarnessMetrics],
     harness_versions: dict[str, str] | None,
     executor_backend: str,
+    preflight_summary: str | None,
 ) -> list[str]:
-    lines: list[str] = ["# Evaluation Summary", ""]
-
-    # Harness table with versions
-    lines.append("## 1. Evaluation Setup")
-    lines.append("")
+    lines: list[str] = ["# Evaluation Summary", "", "## 1. Setup", ""]
 
     versions = harness_versions or {}
-    h_headers = ["Harness", "Version"]
-    h_rows = []
-    for h in config.harnesses:
-        v = versions.get(h, versions.get(h.replace("-", "_"), "—"))
-        h_rows.append([format_harness_name(h), v])
-    lines.append(markdown_table(h_headers, h_rows))
+    rows = []
+    for harness in config.harnesses:
+        version = versions.get(harness, versions.get(harness.replace("-", "_"), "—"))
+        rows.append([format_harness_name(harness), version])
+    lines.append(markdown_table(["Harness", "Version"], rows))
     lines.append("")
-
     lines.append(f"- **Executor:** {executor_backend}")
     if tasks:
-        categories = sorted(set(t.category for t in tasks if t.category))
+        categories = sorted({task.category for task in tasks if task.category})
         lines.append(f"- **Tasks:** {len(tasks)} ({', '.join(categories)})")
     lines.append(f"- **Runs per task:** {config.runs_per_task}")
     lines.append(f"- **Model:** `{config.model_spec.label}`")
     if config.judge_model_spec:
         lines.append(f"- **Judge model:** `{config.judge_model_spec.label}`")
+    if preflight_summary:
+        lines.append(f"- **Preflight:** {preflight_summary}")
     lines.append("")
     return lines
 
@@ -95,10 +88,7 @@ def _section_results(
     results: list[RunResult] | None,
     config: EvalConfig,
 ) -> list[str]:
-    lines: list[str] = []
-    lines.append("## 2. Results")
-    lines.append("")
-
+    lines = ["## 2. Headline Results", ""]
     multi_run = config.runs_per_task > 1
 
     headers = ["Harness", "Pass Rate"]
@@ -117,288 +107,254 @@ def _section_results(
     )
 
     rows: list[list[str]] = []
-    for m in metrics:
+    for metric in metrics:
         estimated = False
         if results:
-            harness_results = [r for r in results if r.harness == m.harness]
-            estimated = any(r.metrics.metrics_estimated for r in harness_results if r.metrics.metrics_estimated)
-
-        row = [
-            format_harness_name(m.harness),
-            format_pass_cell(m.pass_at_1),
-        ]
-        if multi_run:
-            row.append(format_pass_cell(m.pass_at_3) if m.pass_at_3 > 0 else "—")
-            row.extend(
-                [
-                    f"{m.quality_score:.2f}",
-                    format_latency_cell(m.mean_latency_sec),
-                    format_token_cell(m.mean_total_tokens),
-                    format_cost_cell(m.mean_cost_usd, estimated=estimated),
-                    format_cost_cell(m.mean_cost_usd_no_cache, estimated=estimated),
-                    f"{m.mean_tool_calls:.1f}",
-                    format_pass_cell(m.timeout_rate),
-                ]
+            harness_results = [result for result in results if result.harness == metric.harness]
+            estimated = any(
+                result.metrics.metrics_estimated for result in harness_results if result.metrics.metrics_estimated
             )
+
+        row = [format_harness_name(metric.harness), format_pass_cell(metric.pass_at_1)]
+        if multi_run:
+            row.append(format_pass_cell(metric.pass_at_3) if metric.pass_at_3 > 0 else "—")
+        row.extend(
+            [
+                f"{metric.quality_score:.2f}",
+                format_latency_cell(metric.mean_latency_sec),
+                format_token_cell(metric.mean_total_tokens),
+                format_cost_cell(metric.mean_cost_usd, estimated=estimated),
+                format_cost_cell(metric.mean_cost_usd_no_cache, estimated=estimated),
+                f"{metric.mean_tool_calls:.1f}",
+                format_pass_cell(metric.timeout_rate),
+            ]
+        )
         rows.append(row)
 
     lines.append(markdown_table(headers, rows))
     lines.append("")
 
-    # Cache token availability footnote
     if results:
-        harness_has_cache: dict[str, bool] = {}
-        for m in metrics:
-            h_results = [r for r in results if r.harness == m.harness]
-            all_zero = all(r.metrics.cache_read_tokens == 0 and r.metrics.cache_write_tokens == 0 for r in h_results)
-            harness_has_cache[m.harness] = not all_zero
-
-        has_cache_harnesses = [h for h, v in harness_has_cache.items() if v]
-        no_cache_harnesses = [h for h, v in harness_has_cache.items() if not v]
-
-        if has_cache_harnesses and no_cache_harnesses:
-            names = ", ".join(format_harness_name(h) for h in no_cache_harnesses)
-            lines.append(f"*† Cache token data unavailable for {names} — Cost (cached) equals Cost (no cache).*")
-            lines.append("")
-
-    # One-line takeaway
-    if metrics:
-        sorted_by_pass = sorted(metrics, key=lambda m: m.pass_at_1, reverse=True)
-        winner = sorted_by_pass[0]
-        parts = [f"**{format_harness_name(winner.harness)}** leads at {format_pass_cell(winner.pass_at_1)} pass rate"]
-        if len(sorted_by_pass) > 1:
-            runner = sorted_by_pass[1]
-            if runner.pass_at_1 < winner.pass_at_1:
-                parts.append(
-                    f"runner-up **{format_harness_name(runner.harness)}** at {format_pass_cell(runner.pass_at_1)}"
+        applicable_runs = [result for result in results if not is_not_applicable_run(result)]
+        passed_runs = [result for result in applicable_runs if is_pass(result)]
+        if len(metrics) == 1:
+            harness_name = format_harness_name(metrics[0].harness)
+            lines.append(f"{harness_name} passed {len(passed_runs)} of {len(applicable_runs)} applicable runs.")
+        else:
+            ranked = sorted(metrics, key=lambda item: (item.pass_at_1, item.quality_score), reverse=True)
+            winner = ranked[0]
+            if len(ranked) > 1:
+                runner_up = ranked[1]
+                lines.append(
+                    f"{format_harness_name(winner.harness)} led on pass rate and overall quality. "
+                    f"{format_harness_name(runner_up.harness)} was the closest runner-up."
                 )
-        lines.append(". ".join(parts) + ".")
+            else:
+                lines.append(f"{format_harness_name(winner.harness)} led on pass rate.")
         lines.append("")
 
     return lines
 
 
-def _section_analysis(
-    metrics: list[HarnessMetrics],
-    results: list[RunResult],
-) -> list[str]:
-    lines: list[str] = []
-    lines.append("## 3. Analysis")
-    lines.append("")
-
-    lines.extend(_failure_attribution(metrics, results))
-    lines.extend(_category_divergence(results))
-    lines.extend(_cost_quality(metrics))
-    lines.extend(_tool_gaps(metrics))
-
-    return lines
-
-
-# ─── Analysis sub-sections ───
-
-
-def _failure_attribution(
-    metrics: list[HarnessMetrics],
-    results: list[RunResult],
-) -> list[str]:
-    lines: list[str] = []
-    lines.append("### Failure Attribution")
-    lines.append("")
-
-    grader_failures: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
-    for r in results:
-        for g in r.grader_results:
-            if not g.passed:
-                grader_failures[r.harness][g.grader_type] += 1
-
-    if not grader_failures:
-        lines.append("No failures to analyze.")
+def _section_failures(metrics: list[HarnessMetrics], results: list[RunResult]) -> list[str]:
+    lines = ["## 3. Failures", ""]
+    failed_runs = [result for result in results if not is_not_applicable_run(result) and not is_pass(result)]
+    if not failed_runs:
+        lines.append("No failures observed.")
         lines.append("")
         return lines
 
-    headers = ["Harness", "Dominant Failure Mode", "Count", "Notes"]
-    rows: list[list[str]] = []
+    grader_failures: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    for result in results:
+        for grader in result.grader_results:
+            if not grader.passed:
+                grader_failures[result.harness][grader.grader_type] += 1
 
-    for m in sorted(metrics, key=lambda x: x.pass_at_1, reverse=True):
-        h = m.harness
-        failures = grader_failures.get(h)
+    summary_rows: list[list[str]] = []
+    for metric in metrics:
+        failures = grader_failures.get(metric.harness)
         if not failures:
+            summary_rows.append([format_harness_name(metric.harness), "—", "0", "no failures"])
             continue
-        dominant = max(failures, key=failures.get)
-        total_fails = sum(failures.values())
 
-        harness_results = [r for r in results if r.harness == h]
-        timed_out = sum(1 for r in harness_results if r.status == "timed_out")
-        failed = sum(1 for r in harness_results if r.status == "failed")
+        dominant = max(failures, key=failures.get)
+        harness_results = [result for result in results if result.harness == metric.harness]
         notes: list[str] = []
-        if timed_out:
-            notes.append(f"{timed_out} timeout(s)")
-        if failed:
-            notes.append(f"{failed} crash(es)")
-        if failures.get("trajectory", 0) > 0:
-            notes.append(f"{failures['trajectory']} trajectory violation(s)")
-        rows.append(
+        timeout_count = sum(1 for result in harness_results if result.status == "timed_out")
+        failed_count = sum(1 for result in harness_results if result.status == "failed")
+        if timeout_count:
+            notes.append(f"{timeout_count} timeout(s)")
+        if failed_count:
+            notes.append(f"{failed_count} crash(es)")
+        summary_rows.append(
             [
-                format_harness_name(h),
+                format_harness_name(metric.harness),
                 dominant,
                 str(failures[dominant]),
-                "; ".join(notes) if notes else f"{total_fails} total grader failures",
+                "; ".join(notes) if notes else f"{sum(failures.values())} total failure(s)",
             ]
         )
 
-    lines.append(markdown_table(headers, rows))
+    lines.append(markdown_table(["Harness", "Dominant Failure Mode", "Count", "Notes"], summary_rows))
     lines.append("")
 
-    # Hotspot tasks
-    task_fail: dict[str, list[str]] = defaultdict(list)
-    for r in results:
-        if not is_pass(r):
-            task_fail[r.task_id].append(r.harness)
+    task_failures: dict[str, list[str]] = defaultdict(list)
+    for result in failed_runs:
+        task_failures[result.task_id].append(result.harness)
 
-    hotspots = [
-        (tid, hs) for tid, hs in sorted(task_fail.items(), key=lambda x: len(x[1]), reverse=True) if len(hs) >= 3
-    ]
-    if hotspots:
-        lines.append("**Task difficulty hotspots** (failed by 3+ harnesses):")
-        lines.append("")
-        for task_id, harnesses in hotspots:
-            names = ", ".join(format_harness_name(h) for h in harnesses)
-            lines.append(f"- `{task_id}`: {names}")
-        lines.append("")
-
-    # Suspicious grading: all harnesses failed the same grader on a task
-    suspicious: list[tuple[str, int, str]] = []
-    task_harness_results: dict[str, dict[str, list[RunResult]]] = defaultdict(lambda: defaultdict(list))
-    for r in results:
-        task_harness_results[r.task_id][r.harness].append(r)
-
-    for task_id, harness_map in task_harness_results.items():
-        harnesses_that_ran = list(harness_map.keys())
-        if len(harnesses_that_ran) < 3:
-            continue
-        # Check if every harness failed this task
-        all_failed = True
-        failed_grader_types_per_harness: list[set[str]] = []
-        for _, h_results in harness_map.items():
-            h_all_fail = all(not is_pass(r) for r in h_results)
-            if not h_all_fail:
-                all_failed = False
-                break
-            grader_types: set[str] = set()
-            for r in h_results:
-                for g in r.grader_results:
-                    if not g.passed:
-                        grader_types.add(g.grader_type)
-            failed_grader_types_per_harness.append(grader_types)
-        if not all_failed:
-            continue
-        # Find common failed grader types across all harnesses
-        common_graders = failed_grader_types_per_harness[0]
-        for gs in failed_grader_types_per_harness[1:]:
-            common_graders = common_graders & gs
-        if common_graders:
-            for grader_type in sorted(common_graders):
-                suspicious.append((task_id, len(harnesses_that_ran), grader_type))
-
-    if suspicious:
-        lines.append("**Suspicious grading** (all harnesses failed the same grader):")
-        lines.append("")
-        for task_id, n_harnesses, grader_type in suspicious:
-            lines.append(
-                f"- `{task_id}`: all {n_harnesses} harnesses failed "
-                f"`{grader_type}` — grader may be too strict or judge model unreliable"
-            )
-        lines.append("")
-
-    return lines
-
-
-def _category_divergence(results: list[RunResult]) -> list[str]:
-    lines: list[str] = []
-    lines.append("### Category Performance")
-    lines.append("")
-
-    cat_pass: dict[str, dict[str, list[bool]]] = defaultdict(lambda: defaultdict(list))
-    for r in results:
-        cat = r.task_id.split(".")[0] if "." in r.task_id else "other"
-        cat_pass[cat][r.harness].append(is_pass(r))
-
-    entries: list[tuple[str, float, str, float, str, float]] = []
-    for cat, hp in cat_pass.items():
-        rates = {h: (sum(ps) / len(ps)) for h, ps in hp.items() if ps}
-        if len(rates) < 2:
-            continue
-        spread = max(rates.values()) - min(rates.values())
-        best_h = max(rates, key=rates.get)
-        worst_h = min(rates, key=rates.get)
-        entries.append((cat, spread, best_h, rates[best_h], worst_h, rates[worst_h]))
-
-    entries.sort(key=lambda x: x[1], reverse=True)
-
-    if entries:
-        for cat, spread, best_h, best_r, worst_h, worst_r in entries:
-            if spread < 0.01:
-                continue
-            lines.append(
-                f"- **{cat}**: {format_pass_cell(spread)} spread — "
-                f"best {format_harness_name(best_h)} ({format_pass_cell(best_r)}), "
-                f"worst {format_harness_name(worst_h)} ({format_pass_cell(worst_r)})"
-            )
-        lines.append("")
-
-    return lines
-
-
-def _cost_quality(metrics: list[HarnessMetrics]) -> list[str]:
-    lines: list[str] = []
-    costed = [m for m in metrics if m.mean_cost_usd > 0]
-    if len(costed) < 2:
-        return lines
-
-    lines.append("### Cost-Quality Tradeoff")
-    lines.append("")
-
-    best = max(costed, key=lambda m: m.pass_at_1 / m.mean_cost_usd if m.mean_cost_usd > 0 else 0)
-    worst = max(costed, key=lambda m: m.mean_cost_usd)
-
-    lines.append(
-        f"- **Most cost-efficient:** {format_harness_name(best.harness)} "
-        f"({format_pass_cell(best.pass_at_1)} pass rate at "
-        f"{format_cost_cell(best.mean_cost_usd)}/task)"
-    )
-    lines.append(
-        f"- **Most expensive:** {format_harness_name(worst.harness)} "
-        f"({format_cost_cell(worst.mean_cost_usd)}/task, "
-        f"{format_token_cell(worst.mean_total_tokens)} mean tokens)"
-    )
-
-    if worst.mean_cost_usd > 0 and best.mean_cost_usd > 0:
-        ratio = worst.mean_cost_usd / best.mean_cost_usd
-        diff = worst.pass_at_1 - best.pass_at_1
-        if ratio > 1.5:
-            lines.append(
-                f"- {format_harness_name(worst.harness)} costs "
-                f"{ratio:.1f}x more than {format_harness_name(best.harness)} "
-                f"for {'+' if diff >= 0 else ''}{format_pass_cell(diff)} pass rate difference"
-            )
-
-    lines.append("")
-    return lines
-
-
-def _tool_gaps(metrics: list[HarnessMetrics]) -> list[str]:
-    lines: list[str] = []
-    no_tools = [m for m in metrics if m.mean_tool_calls == 0 and m.pass_at_1 < 0.5]
-    if not no_tools:
-        return lines
-
-    lines.append("### Tool Usage Gaps")
-    lines.append("")
-    for m in no_tools:
-        lines.append(
-            f"- **{format_harness_name(m.harness)}** reports 0 tool calls — "
-            f"tasks requiring file operations or shell commands will fail. "
-            f"pass rate = {format_pass_cell(m.pass_at_1)}"
+    task_rows = []
+    for task_id, harnesses in sorted(task_failures.items(), key=lambda item: (-len(item[1]), item[0])):
+        task_rows.append(
+            [
+                task_id,
+                str(len(harnesses)),
+                ", ".join(format_harness_name(harness) for harness in sorted(set(harnesses))),
+            ]
         )
+    lines.append(markdown_table(["Task", "Failures", "Affected Harnesses"], task_rows[:15]))
+    lines.append("")
+    return lines
+
+
+def _section_category_breakdown(
+    metrics: list[HarnessMetrics],
+    results: list[RunResult],
+    tasks: list[Task],
+) -> list[str]:
+    lines = ["## 4. Category Breakdown", ""]
+    category_metrics = compute_category_metrics(
+        results,
+        [{"id": task.id, "category": task.category} for task in tasks],
+        [metric.harness for metric in metrics],
+    )
+
+    if len(metrics) == 1:
+        harness = metrics[0].harness
+        rows: list[list[str]] = []
+        best: tuple[str, float] | None = None
+        worst: tuple[str, float] | None = None
+        for item in sorted(category_metrics, key=lambda item: item.category):
+            if item.harness != harness:
+                continue
+            rows.append(
+                [
+                    item.category.title(),
+                    format_pass_cell(item.pass_rate),
+                    f"{item.avg_quality_score:.2f}",
+                    format_latency_cell(item.median_latency_sec),
+                    format_token_cell(item.median_total_tokens),
+                ]
+            )
+            if best is None or item.pass_rate > best[1]:
+                best = (item.category, item.pass_rate)
+            if worst is None or item.pass_rate < worst[1]:
+                worst = (item.category, item.pass_rate)
+
+        lines.append(markdown_table(["Category", "Pass Rate", "Avg Quality", "Median Latency", "Median Tokens"], rows))
+        lines.append("")
+        if best and worst:
+            lines.append(f"Best category: {best[0].title()}. Weakest category: {worst[0].title()}.")
+            lines.append("")
+        return lines
+
+    grouped: dict[str, list[tuple[str, float]]] = defaultdict(list)
+    for item in category_metrics:
+        grouped[item.category].append((item.harness, item.pass_rate))
+
+    rows = []
+    largest_gap: tuple[str, float] | None = None
+    for category in sorted(grouped):
+        entries = grouped[category]
+        best_harness, best_rate = max(entries, key=lambda item: item[1])
+        worst_rate = min(rate for _, rate in entries)
+        gap = best_rate - worst_rate
+        gap_label = "high" if gap >= 0.5 else "moderate" if gap >= 0.2 else "low"
+        rows.append([category.title(), format_harness_name(best_harness), format_pass_cell(best_rate), gap_label])
+        if largest_gap is None or gap > largest_gap[1]:
+            largest_gap = (category, gap)
+
+    lines.append(markdown_table(["Category", "Best Harness", "Best Pass Rate", "Largest Gap"], rows))
+    lines.append("")
+    if largest_gap and largest_gap[1] > 0:
+        lines.append(f"Largest divergence appeared in {largest_gap[0].title()}.")
+        lines.append("")
+    return lines
+
+
+def _section_judge_summary(results: list[RunResult], judge_label: str) -> list[str]:
+    lines = ["## 5. Judge Summary", ""]
+    applicable = [result for result in results if not is_not_applicable_run(result)]
+
+    all_scores: list[float] = []
+    scores_by_harness: dict[str, list[float]] = defaultdict(list)
+    scores_by_task: dict[str, list[float]] = defaultdict(list)
+    pass_scores: list[float] = []
+    fail_scores: list[float] = []
+
+    for result in applicable:
+        judge_scores = [
+            grader.score
+            for grader in result.grader_results
+            if grader.grader_type == "rubric_judge" and grader.score is not None
+        ]
+        if not judge_scores:
+            continue
+        for score in judge_scores:
+            all_scores.append(score)
+            scores_by_harness[result.harness].append(score)
+            scores_by_task[result.task_id].append(score)
+
+        judge_avg = sum(judge_scores) / len(judge_scores)
+        non_judge = [grader for grader in result.grader_results if grader.grader_type != "rubric_judge"]
+        if non_judge and all(grader.passed for grader in non_judge) and result.status == "completed":
+            pass_scores.append(judge_avg)
+        else:
+            fail_scores.append(judge_avg)
+
+    if not all_scores:
+        return []
+
+    sorted_scores = sorted(all_scores)
+    mid = len(sorted_scores) // 2
+    median_score = sorted_scores[mid] if len(sorted_scores) % 2 else (sorted_scores[mid - 1] + sorted_scores[mid]) / 2
+
+    lines.append(f"- **Primary judge:** `{judge_label}`")
+    lines.append(f"- **Judge evaluations:** {len(all_scores)}")
+    lines.append(f"- **Mean score:** {sum(all_scores) / len(all_scores):.3f}")
+    lines.append(f"- **Median score:** {median_score:.3f}")
+    lines.append(f"- **Min / max:** {min(all_scores):.3f} / {max(all_scores):.3f}")
+    if pass_scores:
+        lines.append(f"- **Passing runs mean judge score:** {sum(pass_scores) / len(pass_scores):.3f}")
+    if fail_scores:
+        lines.append(f"- **Failing runs mean judge score:** {sum(fail_scores) / len(fail_scores):.3f}")
+    lines.append("")
+
+    if len(scores_by_harness) > 1:
+        rows = []
+        for harness in sorted(scores_by_harness):
+            harness_scores = scores_by_harness[harness]
+            rows.append(
+                [
+                    format_harness_name(harness),
+                    f"{sum(harness_scores) / len(harness_scores):.3f}",
+                    f"{min(harness_scores):.3f}",
+                    f"{max(harness_scores):.3f}",
+                ]
+            )
+        lines.append(markdown_table(["Harness", "Mean Judge Score", "Min", "Max"], rows))
+        lines.append("")
+
+    max_spread: tuple[str, float] | None = None
+    for task_id, task_scores in scores_by_task.items():
+        if len(task_scores) < 2:
+            continue
+        spread = max(task_scores) - min(task_scores)
+        if max_spread is None or spread > max_spread[1]:
+            max_spread = (task_id, spread)
+
+    if max_spread and max_spread[1] >= 0.2:
+        lines.append(f"The largest judge score spread appeared on `{max_spread[0]}` ({max_spread[1]:.3f}).")
+    else:
+        lines.append("No judge inconsistency signal was observed in this run.")
     lines.append("")
     return lines

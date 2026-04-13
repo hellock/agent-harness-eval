@@ -38,6 +38,8 @@
 - Keep changes minimal and maintainable.
 - When reviewing or debugging, prioritize bugs, regressions, missing tests, and weak assumptions over style commentary.
 - Note config or migration impact when behavior changes.
+- When creating a git commit, include a descriptive body in addition to the one-line subject. Do not use a subject-only commit message; the body should briefly explain what changed and any important context or verification.
+
 
 ## Local Files
 

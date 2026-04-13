@@ -176,8 +176,10 @@ def test_generate_summary_and_category_reports_include_key_sections() -> None:
     category = generate_category_report(results, tasks, config)
 
     assert "# Evaluation Summary" in summary
-    assert "Codex" in summary and "leads" in summary
-    assert "Results" in summary
+    assert "Codex" in summary
+    assert "## 2. Headline Results" in summary
+    assert "## 3. Failures" in summary
+    assert "## 4. Category Breakdown" in summary
     assert "# Category Breakdown Report" in category
     assert "## Coding" in category
     assert "## Cross-Category Summary" in category
