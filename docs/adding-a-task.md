@@ -91,7 +91,7 @@ bound and can cap longer task timeouts.
 
 ## Grader Types
 
-Tasks can combine multiple graders. Hard graders (objective, deterministic) run first; soft graders (LLM-based) run after.
+Tasks can combine multiple graders. Hard graders (objective, deterministic) run first. LLM-based rubric judges run only after all deterministic graders pass.
 
 ### regex — Pattern Match
 

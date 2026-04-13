@@ -95,7 +95,6 @@ class RubricJudgeGrader:
     rubric: str = ""
     dimensions: list[str | RubricDimensionDef] | None = None
     snapshot_paths: list[str] | None = None
-    hard_grader_override: bool | None = None
 
 
 @dataclass

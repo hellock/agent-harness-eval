@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from agent_harness_eval.graders.rubric_judge import run_rubric_judge
-from agent_harness_eval.graders.specs import GraderResult, RubricJudgeGrader
+from agent_harness_eval.graders.specs import RubricJudgeGrader
 from agent_harness_eval.types import CanonicalTraceEvent, RunResult
 
 
@@ -48,19 +48,6 @@ def _make_result() -> RunResult:
             )
         ],
     )
-
-
-@pytest.mark.asyncio
-async def test_run_rubric_judge_short_circuits_on_hard_grader_override() -> None:
-    judge = FakeJudgeLLM('{"pass": false, "score": 0.0}')
-    spec = RubricJudgeGrader(rubric="must pass", hard_grader_override=True)
-    prior = [GraderResult(grader_type="test_pass", name="test_pass", passed=True, score=1.0)]
-
-    result = await run_rubric_judge(spec, _make_result(), judge, None, prior_results=prior)
-
-    assert result.passed is True
-    assert result.score == 1.0
-    assert judge.prompts == []
 
 
 @pytest.mark.asyncio
@@ -116,6 +103,18 @@ async def test_run_rubric_judge_includes_snapshots_in_prompt(isolated_temp_dir: 
     prompt = judge.prompts[0]
     assert "=== answer.txt ===\nartifact body" in prompt
     assert "=== missing.txt === [not found]" in prompt
+
+
+@pytest.mark.asyncio
+async def test_run_rubric_judge_prompt_has_no_prior_results_section() -> None:
+    """Judge prompt should not contain prior grader results to avoid bias."""
+    judge = FakeJudgeLLM('{"pass": true, "score": 1.0, "reason": "ok"}')
+    spec = RubricJudgeGrader(rubric="evaluate independently")
+
+    await run_rubric_judge(spec, _make_result(), judge, None)
+
+    prompt = judge.prompts[0]
+    assert "Prior Grader Results" not in prompt
 
 
 @pytest.mark.asyncio

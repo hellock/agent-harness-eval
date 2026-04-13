@@ -125,28 +125,11 @@ def _build_tool_sequence(trace: Sequence[CanonicalTraceEvent]) -> str:
     return " -> ".join(names) if names else "none"
 
 
-def _format_prior_results(prior_results: list[GraderResult]) -> str:
-    """Format prior hard grader results for the judge prompt."""
-    if not prior_results:
-        return "No prior grader results."
-
-    lines: list[str] = []
-    for gr in prior_results:
-        status = "PASS" if gr.passed else "FAIL"
-        line = f"- [{status}] {gr.name}"
-        if gr.details:
-            line += f": {gr.details[:200]}"
-        lines.append(line)
-
-    return "\n".join(lines)
-
-
 async def run_rubric_judge(
     spec: GraderSpec,
     result: RunResult,
     judge_llm: JudgeLLM,
     workspace_dir: str | None,
-    prior_results: list[GraderResult] | None = None,
 ) -> GraderResult:
     """Run the LLM rubric judge grader.
 
@@ -154,33 +137,16 @@ async def run_rubric_judge(
     - The rubric text
     - Tool call summary and sequence
     - Workspace snapshots (ground truth)
-    - Prior hard grader results
     - Dimension definitions
 
     Parses per-dimension or flat (single pass/fail) responses.
-    Supports hard_grader_override: if all hard graders passed, rubric
-    automatically passes.
     """
     rubric = spec.rubric or ""
     dimensions = _normalize_dimensions(spec.dimensions)
-    hard_grader_override = spec.hard_grader_override or False
-
-    # Check hard_grader_override
-    if hard_grader_override and prior_results:
-        hard_results = [r for r in prior_results if r.grader_type != "rubric_judge"]
-        if hard_results and all(r.passed for r in hard_results):
-            return GraderResult(
-                grader_type="rubric_judge",
-                name="rubric_judge",
-                passed=True,
-                score=1.0,
-                details="All hard graders passed (hard_grader_override=True)",
-            )
 
     # Build prompt components
     tool_summary = _build_tool_summary(result.trace)
     tool_sequence = _build_tool_sequence(result.trace)
-    prior_str = _format_prior_results(prior_results or [])
 
     # Read workspace snapshots for ground truth
     snapshots_str = ""
@@ -229,9 +195,6 @@ async def run_rubric_judge(
 
 ## Tool Call Details
 {tool_summary}
-
-## Prior Grader Results
-{prior_str}
 """
 
     if snapshots_str:

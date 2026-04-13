@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Protocol
 
@@ -40,7 +41,11 @@ async def run_graders(
     harness_name: str = "",
     grader_env: dict[str, str] | None = None,
 ) -> list[GraderResult]:
-    """Run all graders for a task in two passes: hard then soft.
+    """Run all graders for a task in two phases.
+
+    Deterministic graders (test_pass, file_exists, regex, json_schema,
+    trajectory, test_suite) run first. LLM judge graders (rubric_judge)
+    only run if every deterministic grader passed.
 
     Auto-injects boundary_respected trajectory checks for any disabled
     tool_boundary constraints not already covered by an explicit grader.
@@ -66,13 +71,7 @@ async def run_graders(
                     )
                 )
 
-    hard_specs = [s for s in specs if _is_hard_grader(s)]
-    soft_specs = [s for s in specs if not _is_hard_grader(s)]
-
-    results: list[GraderResult] = []
-
-    # Pass 1: hard graders
-    for spec in hard_specs:
+    async def _run_one(spec: GraderSpec) -> GraderResult:
         try:
             gr = await _dispatch_grader(
                 spec,
@@ -80,56 +79,39 @@ async def run_graders(
                 result,
                 judge_llm,
                 workspace_dir,
-                results,
                 executor=executor,
                 execution_policy=execution_policy,
                 harness_name=harness_name,
                 grader_env=grader_env,
             )
             if gr is not None:
-                results.append(gr)
+                return gr
+            return GraderResult(
+                grader_type=spec.type,
+                name=_grader_name(spec),
+                passed=False,
+                score=0.0,
+                details="Grader returned None",
+            )
         except Exception as exc:
             logger.error("Grader %s failed: %s", spec.type, exc, exc_info=True)
-            results.append(
-                GraderResult(
-                    grader_type=spec.type,
-                    name=_grader_name(spec),
-                    passed=False,
-                    score=0.0,
-                    details=f"Grader error: {exc}",
-                )
+            return GraderResult(
+                grader_type=spec.type,
+                name=_grader_name(spec),
+                passed=False,
+                score=0.0,
+                details=f"Grader error: {exc}",
             )
 
-    # Pass 2: soft graders
-    for spec in soft_specs:
-        try:
-            gr = await _dispatch_grader(
-                spec,
-                task,
-                result,
-                judge_llm,
-                workspace_dir,
-                results,
-                executor=executor,
-                execution_policy=execution_policy,
-                harness_name=harness_name,
-                grader_env=grader_env,
-            )
-            if gr is not None:
-                results.append(gr)
-        except Exception as exc:
-            logger.error("Grader %s failed: %s", spec.type, exc, exc_info=True)
-            results.append(
-                GraderResult(
-                    grader_type=spec.type,
-                    name=_grader_name(spec),
-                    passed=False,
-                    score=0.0,
-                    details=f"Grader error: {exc}",
-                )
-            )
+    deterministic_specs = [spec for spec in specs if _is_deterministic(spec)]
+    llm_specs = [spec for spec in specs if not _is_deterministic(spec)]
 
-    return results
+    deterministic_results = list(await asyncio.gather(*[_run_one(spec) for spec in deterministic_specs]))
+    if any(not result.passed for result in deterministic_results):
+        return deterministic_results
+
+    llm_results = list(await asyncio.gather(*[_run_one(spec) for spec in llm_specs]))
+    return deterministic_results + llm_results
 
 
 async def _dispatch_grader(
@@ -138,7 +120,6 @@ async def _dispatch_grader(
     result: RunResult,
     judge_llm: JudgeLLM | None,
     workspace_dir: str | None,
-    prior_results: list[GraderResult],
     *,
     executor: Any | None = None,
     execution_policy: Any | None = None,
@@ -193,7 +174,7 @@ async def _dispatch_grader(
                     score=0.0,
                     details="No judge LLM configured",
                 )
-            return await run_rubric_judge(spec, result, judge_llm, workspace_dir, prior_results=prior_results)
+            return await run_rubric_judge(spec, result, judge_llm, workspace_dir)
         case _:
             logger.warning("Unhandled grader type: %s", spec.type)
             return None
@@ -214,7 +195,8 @@ def _grader_name(spec: GraderSpec) -> str:
             return spec.type
 
 
-def _is_hard_grader(spec: GraderSpec) -> bool:
+def _is_deterministic(spec: GraderSpec) -> bool:
+    """Return True for graders with deterministic (non-LLM) evaluation."""
     return spec.type in {
         "test_pass",
         "file_exists",
