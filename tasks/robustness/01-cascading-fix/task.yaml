@@ -49,4 +49,4 @@ graders:
       - iterative_verification
       - explanation_quality
       - minimal_changes
-timeout_sec: 900
+timeout_sec: 300

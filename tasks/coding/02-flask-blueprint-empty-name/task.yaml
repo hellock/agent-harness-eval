@@ -54,4 +54,4 @@ graders:
         required: true
       - name: minimal_change
         required: false
-timeout_sec: 600
+timeout_sec: 300

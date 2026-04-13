@@ -98,4 +98,4 @@ graders:
         required: true
       - name: no_repeat_explanation
         required: true
-timeout_sec: 450
+timeout_sec: 300

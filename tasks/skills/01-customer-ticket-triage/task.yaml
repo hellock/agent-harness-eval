@@ -67,4 +67,4 @@ graders:
         required: true
       - name: summary_table
         required: true
-timeout_sec: 600
+timeout_sec: 300

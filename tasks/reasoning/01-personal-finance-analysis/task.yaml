@@ -76,4 +76,4 @@ graders:
         required: true
       - name: cut_suggestions_quality
         required: true
-timeout_sec: 450
+timeout_sec: 300

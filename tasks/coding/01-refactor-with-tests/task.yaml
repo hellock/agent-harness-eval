@@ -46,4 +46,4 @@ graders:
       - LRU实现
       - 测试理解
       - 说明质量
-timeout_sec: 900
+timeout_sec: 300

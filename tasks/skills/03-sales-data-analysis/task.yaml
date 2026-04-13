@@ -88,4 +88,4 @@ graders:
         required: true
       - name: ranked_by_impact
         required: true
-timeout_sec: 600
+timeout_sec: 300

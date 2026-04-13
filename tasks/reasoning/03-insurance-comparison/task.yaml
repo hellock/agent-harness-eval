@@ -90,4 +90,4 @@ graders:
         required: true
       - name: comparison_table_present
         required: true
-timeout_sec: 450
+timeout_sec: 300

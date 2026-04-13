@@ -129,4 +129,4 @@ graders:
         required: true
       - name: arrival_departure_logistics
         required: true
-timeout_sec: 900
+timeout_sec: 300

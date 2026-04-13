@@ -90,4 +90,4 @@ graders:
         required: true
       - name: risk_summary_present
         required: true
-timeout_sec: 450
+timeout_sec: 300

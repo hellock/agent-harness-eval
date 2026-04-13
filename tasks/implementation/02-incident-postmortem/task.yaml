@@ -148,4 +148,4 @@ graders:
         required: true
       - name: five_why_visible
         required: false
-timeout_sec: 600
+timeout_sec: 300

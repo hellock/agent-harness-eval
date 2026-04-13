@@ -160,4 +160,4 @@ graders:
       - test_update
       - doc_update
       - no_logic_change
-timeout_sec: 900
+timeout_sec: 300
