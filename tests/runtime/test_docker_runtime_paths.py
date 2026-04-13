@@ -15,8 +15,10 @@ from agent_harness_eval.executor import (
 )
 from agent_harness_eval.executor.docker import (
     DockerExecutor,
+    ensure_managed_harness_images,
     resolve_docker_image,
 )
+from agent_harness_eval.utils.subprocess import SubprocessResult
 from agent_harness_eval.utils.workspace import RunLayout
 
 
@@ -265,3 +267,110 @@ def test_wrap_docker_mounts_only_harness_state_for_non_managed_image(
     harness_state_dir = runtime_config.harness_state_dir("nanobot")
     assert any(arg == f"{harness_state_dir}:{harness_state_dir}:rw" for arg in command.args)
     assert f"{runtime_config.state_dir}:{runtime_config.state_dir}:rw" not in command.args
+
+
+@pytest.mark.asyncio
+async def test_ensure_managed_harness_images_passes_managed_build_env_to_build_script(
+    isolated_run_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = isolated_run_dir
+    build_script = project_root / "docker" / "fake-managed" / "build_docker_image.sh"
+    build_script.parent.mkdir(parents=True)
+    build_script.write_text("#!/usr/bin/env bash\nexit 0\n")
+
+    class FakeManagedAdapter:
+        managed_docker_image = True
+
+        @classmethod
+        def managed_docker_build_env(cls, runtime_config: RuntimeConfig) -> dict[str, str]:
+            return {"EVAL_FAKE_SOURCE_ROOT": "/tmp/fake-src"}
+
+    runtime_config = RuntimeConfig(
+        project_root=project_root,
+        harness_config={"fake_managed": {"version": "0.1.0"}},
+    )
+    calls: list[tuple[str, list[str], dict[str, str] | None]] = []
+
+    async def fake_run_subprocess(
+        command: str,
+        args: list[str],
+        *,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        timeout_ms: int,
+        stdin: str | None = None,
+        filtered_env: bool = True,
+        inherit_env: bool = True,
+    ) -> SubprocessResult:
+        calls.append((command, args, env))
+        if command == "docker" and args[:2] == ["image", "inspect"]:
+            return SubprocessResult(stdout="", stderr="", exit_code=1, timed_out=False)
+        return SubprocessResult(stdout="", stderr="", exit_code=0, timed_out=False)
+
+    monkeypatch.setattr("agent_harness_eval.executor.docker.run_subprocess", fake_run_subprocess)
+    monkeypatch.setattr(
+        "agent_harness_eval.executor.docker._get_managed_harness_adapter_cls",
+        lambda harness: FakeManagedAdapter if harness == "fake-managed" else None,
+    )
+
+    await ensure_managed_harness_images(
+        project_root,
+        ["fake-managed"],
+        runtime_config,
+        selected_images={"fake-managed": "agent-harness-eval-fake-managed:0.1.0"},
+    )
+
+    assert len(calls) == 2
+    assert calls[1][0] == "bash"
+    assert calls[1][2] == {"EVAL_FAKE_SOURCE_ROOT": "/tmp/fake-src"}
+
+
+@pytest.mark.asyncio
+async def test_ensure_managed_harness_images_requires_build_env_from_managed_adapter(
+    isolated_run_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = isolated_run_dir
+    build_script = project_root / "docker" / "fake-managed" / "build_docker_image.sh"
+    build_script.parent.mkdir(parents=True)
+    build_script.write_text("#!/usr/bin/env bash\nexit 0\n")
+
+    class FakeManagedAdapter:
+        managed_docker_image = True
+
+        @classmethod
+        def managed_docker_build_env(cls, runtime_config: RuntimeConfig) -> dict[str, str]:
+            raise ValueError("managed build env is required")
+
+    runtime_config = RuntimeConfig(
+        project_root=project_root,
+        harness_config={"fake_managed": {"version": "0.1.0"}},
+    )
+
+    async def fake_run_subprocess(
+        command: str,
+        args: list[str],
+        *,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        timeout_ms: int,
+        stdin: str | None = None,
+        filtered_env: bool = True,
+        inherit_env: bool = True,
+    ) -> SubprocessResult:
+        return SubprocessResult(stdout="", stderr="", exit_code=1, timed_out=False)
+
+    monkeypatch.setattr("agent_harness_eval.executor.docker.run_subprocess", fake_run_subprocess)
+    monkeypatch.setattr(
+        "agent_harness_eval.executor.docker._get_managed_harness_adapter_cls",
+        lambda harness: FakeManagedAdapter if harness == "fake-managed" else None,
+    )
+
+    with pytest.raises(ValueError, match="managed build env is required"):
+        await ensure_managed_harness_images(
+            project_root,
+            ["fake-managed"],
+            runtime_config,
+            selected_images={"fake-managed": "agent-harness-eval-fake-managed:0.1.0"},
+        )

@@ -169,14 +169,23 @@ def get_managed_harness_image(
     """Return the managed image tag for a harness, if this repo owns it."""
     if harness is None:
         return None
+    cls = _get_managed_harness_adapter_cls(harness)
+    if cls is None:
+        return None
+    version = _get_harness_version(harness, runtime_config)
+    tag = re.sub(r"[^A-Za-z0-9_.-]+", "-", version).strip(".-") or "latest"
+    return f"agent-harness-eval-{harness}:{tag}"
+
+
+def _get_managed_harness_adapter_cls(
+    harness: str,
+):
     from ..adapters import list_registered_adapters
 
     cls = list_registered_adapters().get(harness)
     if not getattr(cls, "managed_docker_image", False):
         return None
-    version = _get_harness_version(harness, runtime_config)
-    tag = re.sub(r"[^A-Za-z0-9_.-]+", "-", version).strip(".-") or "latest"
-    return f"agent-harness-eval-{harness}:{tag}"
+    return cls
 
 
 def selected_image_is_managed(
@@ -216,10 +225,12 @@ async def ensure_managed_harness_images(
         build_script_path = project_root / "docker" / harness / "build_docker_image.sh"
         if not build_script_path.is_file():
             raise FileNotFoundError(f"Managed docker build script not found for {harness}: {build_script_path}")
+        build_env = _managed_harness_build_env(harness, runtime_config)
         build_result = await run_subprocess(
             "bash",
             [str(build_script_path), _get_harness_version(harness, runtime_config), managed_image],
             cwd=str(project_root),
+            env=build_env,
             timeout_ms=10 * 60 * 1000,
             filtered_env=False,
         )
@@ -233,3 +244,13 @@ def _get_harness_version(harness: str, runtime_config: RuntimeConfig) -> str:
     cfg = runtime_config.harness_config.get(yaml_key) or runtime_config.harness_config.get(harness) or {}
     version = str(cfg.get("version") or "latest").strip()
     return version or "latest"
+
+
+def _managed_harness_build_env(
+    harness: str,
+    runtime_config: RuntimeConfig,
+) -> dict[str, str] | None:
+    cls = _get_managed_harness_adapter_cls(harness)
+    if cls is None:
+        return None
+    return cls.managed_docker_build_env(runtime_config)

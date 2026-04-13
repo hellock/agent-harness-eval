@@ -99,6 +99,14 @@ class HarnessAdapter(ABC):
     supports_conversation_history_replay: ClassVar[bool] = False
     emits_paired_trace_events: ClassVar[bool] = False
 
+    @classmethod
+    def managed_docker_build_env(
+        cls,
+        runtime_config: RuntimeConfig,
+    ) -> dict[str, str] | None:
+        """Optional environment variables required by the managed Docker build."""
+        return None
+
     def __init__(self, runtime_config: RuntimeConfig, executor: Executor):
         self.runtime_config = runtime_config
         self.executor = executor
