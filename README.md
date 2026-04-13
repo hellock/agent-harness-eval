@@ -303,11 +303,11 @@ results/run__<timestamp>__<model>__<harness>__<tasks>/
 - Executor: `docker`
 - Runs per task: `3`
 
-| Harness | pass@1 | pass@3 | Avg Quality | Mean Time | Mean Tokens | Median Cost |
-|---------|--------|--------|-------------|-----------|-------------|-------------|
-| Codex | 82.0% | 94.0% | 0.91 | 18.4s | 14.2k | $0.28 |
-| OpenClaw | 79.0% | 92.0% | 0.89 | 16.7s | 12.8k | $0.24 |
-| Claude Code | 75.0% | 90.0% | 0.87 | 14.9s | 11.3k | $0.21 |
+| Harness | Pass Rate | Avg Pass Rate | Avg Quality | Mean Time | Mean Tokens | Mean Cost | Mean Cost Without Cache |
+|---------|-----------|---------------|-------------|-----------|-------------|-----------|-------------------------|
+| Codex | 82.0% | 94.0% | 0.91 | 18.4s | 14.2k | $0.18 | $0.28 |
+| OpenClaw | 79.0% | 92.0% | 0.89 | 16.7s | 12.8k | $0.16 | $0.24 |
+| Claude Code | 75.0% | 90.0% | 0.87 | 14.9s | 11.3k | $0.15 | $0.21 |
 
 ## Category Breakdown
 

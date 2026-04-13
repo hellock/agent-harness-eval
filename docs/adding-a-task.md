@@ -156,7 +156,7 @@ Shorthand with `runner: pytest` expands each string to `python -m pytest <case> 
 
 Each case runs with a 30-second timeout. The grader score equals `passed_count / total_count`, and `passed` is true when `score >= pass_threshold`.
 
-`test_pass` and `test_suite` run as verifier-side checks, not agent actions. They execute with shell and file writes enabled so they can rebuild test environments, install dependencies, and write caches or virtualenvs inside the workspace.
+`test_pass` and `test_suite` run as verifier-side checks, not agent actions. They execute with shell, network, and file writes enabled so they can rebuild test environments, install dependencies, and write caches or virtualenvs inside the workspace.
 
 ### file_exists — Check File Presence
 
