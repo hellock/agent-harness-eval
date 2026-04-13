@@ -7,7 +7,11 @@ from pathlib import Path
 
 import pytest
 
-from agent_harness_eval.adapters.zeroclaw import ZeroClawAdapter, _read_zeroclaw_runtime_trace, _sync_back
+from agent_harness_eval.adapters.zeroclaw import (
+    ZeroClawAdapter,
+    _patch_zeroclaw_autonomy_config,
+    _read_zeroclaw_runtime_trace,
+)
 from agent_harness_eval.config.providers import ProviderConfig
 from agent_harness_eval.config.runtime import RuntimeConfig
 from agent_harness_eval.task import Task
@@ -18,7 +22,7 @@ from ._regression_helpers import SequentialRecordingExecutor, arg_value
 
 
 @pytest.mark.asyncio
-async def test_zeroclaw_run_uses_onboard_then_agent_and_syncs_private_workspace(
+async def test_zeroclaw_run_uses_onboard_then_agent_in_authoritative_workspace(
     isolated_run_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -59,8 +63,7 @@ async def test_zeroclaw_run_uses_onboard_then_agent_and_syncs_private_workspace(
     prepared = adapter.prepare(task, "zeroclaw-regression")
     config_dir = Path(prepared.env["_EVAL_CONFIG_DIR"])
     workspace_dir = Path(prepared.workspace_dir)
-    zc_workspace = config_dir / "workspace"
-    zc_workspace_holder["path"] = zc_workspace
+    zc_workspace_holder["path"] = workspace_dir
 
     monkeypatch.setattr(
         "agent_harness_eval.adapters.zeroclaw._read_zeroclaw_runtime_trace",
@@ -81,7 +84,7 @@ async def test_zeroclaw_run_uses_onboard_then_agent_and_syncs_private_workspace(
     )
     monkeypatch.setattr(
         "agent_harness_eval.adapters.zeroclaw._patch_zeroclaw_autonomy_config",
-        lambda config_dir_arg, workspace_dir_arg: (config_dir / "config.toml").write_text(
+        lambda config_dir_arg, workspace_dir_arg, **kwargs: (config_dir / "config.toml").write_text(
             '[security]\nlevel = "full"\n', encoding="utf-8"
         ),
     )
@@ -103,7 +106,7 @@ async def test_zeroclaw_run_uses_onboard_then_agent_and_syncs_private_workspace(
         onboard_args = onboard_call["inner_args"]
         assert isinstance(onboard_args, list)
         assert onboard_args[0] == "onboard"
-        assert arg_value(onboard_args, "--config-dir") == prepared.env["_EVAL_CONFIG_DIR"]
+        assert "--config-dir" not in onboard_args
         assert "--quick" in onboard_args
         assert "--force" in onboard_args
         assert arg_value(onboard_args, "--provider") == "anthropic-custom:https://relay.example.com/v1"
@@ -113,7 +116,7 @@ async def test_zeroclaw_run_uses_onboard_then_agent_and_syncs_private_workspace(
         agent_args = agent_call["inner_args"]
         assert isinstance(agent_args, list)
         assert agent_args[0] == "agent"
-        assert arg_value(agent_args, "--config-dir") == prepared.env["_EVAL_CONFIG_DIR"]
+        assert "--config-dir" not in agent_args
         assert arg_value(agent_args, "--provider") == "anthropic-custom:https://relay.example.com/v1"
         assert arg_value(agent_args, "--message")
 
@@ -121,8 +124,9 @@ async def test_zeroclaw_run_uses_onboard_then_agent_and_syncs_private_workspace(
         assert isinstance(env, dict)
         assert env["ANTHROPIC_API_KEY"] == "anthropic-key"
         assert env["HOME"] == prepared.env["_EVAL_RUNTIME_DIR"]
+        assert env["ZEROCLAW_WORKSPACE"] == prepared.workspace_dir
+        assert config_dir == workspace_dir.parent / ".zeroclaw"
 
-        assert (zc_workspace / "README.md").read_text(encoding="utf-8") == "updated by zeroclaw\n"
         assert workspace_dir.joinpath("README.md").read_text(encoding="utf-8") == "updated by zeroclaw\n"
         assert workspace_dir.joinpath("created.txt").read_text(encoding="utf-8") == "new file\n"
     finally:
@@ -165,7 +169,7 @@ async def test_zeroclaw_run_returns_failed_result_when_trace_parse_fails(
 
     monkeypatch.setattr(
         "agent_harness_eval.adapters.zeroclaw._patch_zeroclaw_autonomy_config",
-        lambda config_dir_arg, workspace_dir_arg: (config_dir / "config.toml").write_text(
+        lambda config_dir_arg, workspace_dir_arg, **kwargs: (config_dir / "config.toml").write_text(
             '[security]\nlevel = "full"\n', encoding="utf-8"
         ),
     )
@@ -194,41 +198,151 @@ async def test_zeroclaw_run_returns_failed_result_when_trace_parse_fails(
         adapter.cleanup(prepared)
 
 
-def test_sync_back_mirrors_workspace_state() -> None:
-    root = Path(tempfile.mkdtemp(prefix="agent-harness-eval-test-"))
+@pytest.mark.asyncio
+async def test_zeroclaw_run_fails_fast_when_onboard_exits_non_zero(
+    isolated_run_dir: Path,
+) -> None:
+    runtime_config = RuntimeConfig(
+        project_root=isolated_run_dir,
+        providers={
+            "relay": ProviderConfig(
+                base_url="https://relay.example.com/v1",
+                api_key="anthropic-key",
+                api_format="anthropic",
+            )
+        },
+    )
+    executor = SequentialRecordingExecutor(
+        runtime_config,
+        [
+            SubprocessResult(stdout="", stderr="bad config", exit_code=2, timed_out=False),
+        ],
+    )
+    adapter = ZeroClawAdapter(runtime_config, executor)
+    task = Task(
+        id="zeroclaw.regression.onboard-failure",
+        category="coding",
+        description="zeroclaw onboard failure",
+        user_query="Reply with ZERO_OK.",
+        workspace_files=[{"path": "README.md", "content": "seed\n"}],
+        timeout_sec=30,
+    )
+    prepared = adapter.prepare(task, "zeroclaw-onboard-failure")
+
     try:
-        src_dir = root / "src"
-        dst_dir = root / "dst"
-        src_dir.mkdir()
-        dst_dir.mkdir()
+        result = await adapter.run(prepared, "relay:claude-sonnet-4-6")
 
-        (src_dir / "keep.txt").write_text("new contents\n")
-        (src_dir / "nested").mkdir()
-        (src_dir / "nested" / "created.txt").write_text("created\n")
-        (src_dir / "dir-target").mkdir()
-        (src_dir / "dir-target" / "inside.txt").write_text("dir now\n")
-        (src_dir / "file-target.txt").write_text("file now\n")
-
-        (dst_dir / "keep.txt").write_text("old contents\n")
-        (dst_dir / "stale.txt").write_text("remove me\n")
-        (dst_dir / "nested").mkdir()
-        (dst_dir / "nested" / "stale.txt").write_text("remove nested\n")
-        (dst_dir / "dir-target").write_text("was a file\n")
-        (dst_dir / "file-target.txt").mkdir()
-        (dst_dir / "file-target.txt" / "old.txt").write_text("was a dir\n")
-
-        _sync_back(str(src_dir), str(dst_dir))
-
-        assert (dst_dir / "keep.txt").read_text() == "new contents\n"
-        assert not (dst_dir / "stale.txt").exists()
-        assert not (dst_dir / "nested" / "stale.txt").exists()
-        assert (dst_dir / "nested" / "created.txt").read_text() == "created\n"
-        assert (dst_dir / "dir-target").is_dir()
-        assert (dst_dir / "dir-target" / "inside.txt").read_text() == "dir now\n"
-        assert (dst_dir / "file-target.txt").is_file()
-        assert (dst_dir / "file-target.txt").read_text() == "file now\n"
+        assert result.status == "failed"
+        assert len(executor.calls) == 1
+        assert result.trace and result.trace[0].type == "task_failed"
+        assert "ZeroClaw onboard exited with code 2" in (result.trace[0].error or "")
     finally:
-        shutil.rmtree(root, ignore_errors=True)
+        adapter.cleanup(prepared)
+
+
+@pytest.mark.asyncio
+async def test_zeroclaw_run_syncs_workspace_back_even_when_agent_fails(
+    isolated_run_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_config = RuntimeConfig(
+        project_root=isolated_run_dir,
+        providers={
+            "relay": ProviderConfig(
+                base_url="https://relay.example.com/v1",
+                api_key="anthropic-key",
+                api_format="anthropic",
+            )
+        },
+    )
+    zc_workspace_holder: dict[str, Path] = {}
+    executor = SequentialRecordingExecutor(
+        runtime_config,
+        [
+            SubprocessResult(stdout="", stderr="", exit_code=0, timed_out=False),
+            SubprocessResult(stdout="", stderr="agent failed", exit_code=3, timed_out=False),
+        ],
+        side_effects=[
+            None,
+            lambda: (
+                zc_workspace_holder["path"]
+                .joinpath("README.md")
+                .write_text("modified before failure\n", encoding="utf-8")
+            ),
+        ],
+    )
+    adapter = ZeroClawAdapter(runtime_config, executor)
+    task = Task(
+        id="zeroclaw.regression.sync-on-failure",
+        category="coding",
+        description="zeroclaw workspace sync on failure",
+        user_query="Reply with ZERO_OK.",
+        workspace_files=[{"path": "README.md", "content": "seed\n"}],
+        timeout_sec=30,
+    )
+    prepared = adapter.prepare(task, "zeroclaw-sync-failure")
+    config_dir = Path(prepared.env["_EVAL_CONFIG_DIR"])
+    zc_workspace_holder["path"] = Path(prepared.workspace_dir)
+
+    monkeypatch.setattr(
+        "agent_harness_eval.adapters.zeroclaw._patch_zeroclaw_autonomy_config",
+        lambda config_dir_arg, workspace_dir_arg, **kwargs: (config_dir / "config.toml").write_text(
+            '[security]\nlevel = "full"\n', encoding="utf-8"
+        ),
+    )
+    monkeypatch.setattr(
+        "agent_harness_eval.adapters.zeroclaw._inject_zeroclaw_api_key",
+        lambda config_dir_arg, api_key: (config_dir / "config.toml").write_text(
+            f'api_key = "{api_key}"\n', encoding="utf-8"
+        ),
+    )
+
+    try:
+        result = await adapter.run(prepared, "relay:claude-sonnet-4-6")
+
+        assert result.status == "failed"
+        assert result.trace and result.trace[0].type == "task_failed"
+        assert Path(prepared.workspace_dir, "README.md").read_text(encoding="utf-8") == "modified before failure\n"
+    finally:
+        adapter.cleanup(prepared)
+
+
+def test_patch_zeroclaw_autonomy_config_relaxes_shell_policy_for_docker(tmp_path: Path) -> None:
+    config_dir = tmp_path / ".zeroclaw"
+    config_dir.mkdir()
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    config_path = config_dir / "config.toml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "[security]",
+                'level = "supervised"',
+                'forbidden_paths = ["/tmp", "/etc"]',
+                "allowed_roots = []",
+                'allowed_commands = ["git", "npm"]',
+                "require_approval_for_medium_risk = true",
+                "block_high_risk_commands = true",
+                "max_actions_per_hour = 30",
+                "workspace_only = true",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    _patch_zeroclaw_autonomy_config(
+        str(config_dir),
+        str(workspace_dir),
+        relax_shell_commands=True,
+    )
+
+    content = config_path.read_text(encoding="utf-8")
+    assert 'level = "full"' in content
+    assert f'allowed_roots = ["{workspace_dir}"]' in content
+    assert 'allowed_commands = ["*"]' in content
+    assert "block_high_risk_commands = false" in content
+    assert "require_approval_for_medium_risk = false" in content
 
 
 def test_read_zeroclaw_runtime_trace_missing_file() -> None:

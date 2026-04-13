@@ -11,11 +11,12 @@ import json
 import os
 import re
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, ClassVar
 
 from ..config.providers import parse_model_spec
 from ..constants import STDERR_PREVIEW_MAX_CHARS, TOOL_OUTPUT_MAX_CHARS
-from ..executor import attach_run_layout_mounts, filter_env, policy_from_task
+from ..executor import VolumeMount, attach_run_layout_mounts, filter_env, policy_from_task
 from ..task import Task
 from ..types import CanonicalTraceEvent, RunMetrics, RunResult
 from ..utils.conversation import format_task_message
@@ -44,8 +45,9 @@ class ZeroClawAdapter(HarnessAdapter):
         attach_run_layout_mounts(execution_policy, layout)
 
         runtime_dir = layout.state_dir
-        config_dir = os.path.join(runtime_dir, "config")
+        config_dir = str(Path(workspace_dir).parent / ".zeroclaw")
         os.makedirs(config_dir, exist_ok=True)
+        execution_policy.extra_mounts.append(VolumeMount(source=config_dir, target=config_dir, mode="rw"))
         return PreparedRun(
             task=task,
             layout=layout,
@@ -83,9 +85,10 @@ class ZeroClawAdapter(HarnessAdapter):
         extra_env: dict[str, str] = {
             **prepared.env,
             "HOME": runtime_dir,
+            "ZEROCLAW_WORKSPACE": workspace_dir,
             key_env: provider.api_key,
         }
-        passthrough = ["HOME", key_env]
+        passthrough = ["HOME", "ZEROCLAW_WORKSPACE", key_env]
 
         inner_env = filter_env(self.runtime_config.subprocess_env, extra_env, passthrough)
         zeroclaw_bin = self.resolve_binary()
@@ -93,8 +96,6 @@ class ZeroClawAdapter(HarnessAdapter):
         # Step 1: Onboard
         onboard_args = [
             "onboard",
-            "--config-dir",
-            config_dir,
             "--quick",
             "--force",
             "--provider",
@@ -122,23 +123,43 @@ class ZeroClawAdapter(HarnessAdapter):
                 RunMetrics(latency_sec=task.timeout_sec),
             )
 
-        # Relax autonomy for eval (allow workspace access, no approval needed)
-        _patch_zeroclaw_autonomy_config(config_dir, workspace_dir)
+        onboard_failure = detect_subprocess_failure(onboard_result, command_label="ZeroClaw onboard")
+        if onboard_failure:
+            latency_sec = asyncio.get_running_loop().time() - start_time
+            return self._make_result(
+                task,
+                model,
+                "failed",
+                onboard_result.stdout or "",
+                [
+                    CanonicalTraceEvent(
+                        type="task_failed",
+                        error=onboard_failure.error,
+                        ts=datetime.now(UTC).isoformat(),
+                    )
+                ],
+                RunMetrics(latency_sec=latency_sec),
+                failure_origin=onboard_failure.failure_origin,
+                infra_error_code=onboard_failure.infra_error_code,
+            )
+
+        # Relax autonomy for eval (allow workspace access, no approval needed).
+        # In Docker, harness-eval's container boundary is the primary safety
+        # control, so when shell access is enabled we also relax ZeroClaw's
+        # command allowlist to avoid fighting the outer executor policy.
+        _patch_zeroclaw_autonomy_config(
+            config_dir,
+            workspace_dir,
+            relax_shell_commands=execution_policy.shell and self.runtime_config.executor_backend == "docker",
+        )
 
         # Inject api_key into config.toml — zeroclaw's anthropic-custom:
         # provider reads the key from this field rather than ANTHROPIC_API_KEY.
         _inject_zeroclaw_api_key(config_dir, provider.api_key)
 
-        # Zeroclaw uses config_dir/workspace as its working dir. Mirror the eval
-        # workspace there so file tools operate on the same starting state.
-        zc_workspace = os.path.join(config_dir, "workspace")
-        _sync_back(workspace_dir, zc_workspace)
-
         # Step 2: Agent
         agent_args = [
             "agent",
-            "--config-dir",
-            config_dir,
             "--provider",
             zc_provider_flag,
             "--model",
@@ -186,10 +207,6 @@ class ZeroClawAdapter(HarnessAdapter):
                 failure_origin=subprocess_failure.failure_origin,
                 infra_error_code=subprocess_failure.infra_error_code,
             )
-
-        # Mirror zeroclaw's workspace back into the eval workspace so graders see
-        # creates, modifications, deletions, and renames.
-        _sync_back(zc_workspace, workspace_dir)
 
         try:
             # Sanitize stdout: strip ANSI codes and trim
@@ -268,37 +285,6 @@ class ZeroClawAdapter(HarnessAdapter):
         remove_workspace(prepared.workspace_dir)
 
 
-def _sync_back(src_dir: str, dst_dir: str) -> None:
-    """Mirror src_dir into dst_dir, including deletions and type changes."""
-    import shutil
-
-    os.makedirs(dst_dir, exist_ok=True)
-
-    src_entries = set(os.listdir(src_dir))
-    dst_entries = set(os.listdir(dst_dir))
-
-    for item in dst_entries - src_entries:
-        dst = os.path.join(dst_dir, item)
-        if os.path.isdir(dst):
-            shutil.rmtree(dst)
-        else:
-            os.remove(dst)
-
-    for item in src_entries:
-        src = os.path.join(src_dir, item)
-        dst = os.path.join(dst_dir, item)
-        if os.path.isfile(src):
-            if os.path.isdir(dst):
-                shutil.rmtree(dst)
-            shutil.copy2(src, dst)
-        elif os.path.isdir(src):
-            if os.path.isfile(dst):
-                os.remove(dst)
-            _sync_back(src, dst)
-        else:
-            raise ValueError(f"Unsupported workspace entry: {src}")
-
-
 def _inject_zeroclaw_api_key(config_dir: str, api_key: str) -> None:
     """Write top-level ``api_key`` into config.toml.
 
@@ -337,6 +323,8 @@ def _inject_zeroclaw_api_key(config_dir: str, api_key: str) -> None:
 def _patch_zeroclaw_autonomy_config(
     config_dir: str,
     workspace_dir: str,
+    *,
+    relax_shell_commands: bool = False,
 ) -> None:
     """Patch config.toml to allow tool use in the eval workspace.
 
@@ -380,6 +368,20 @@ def _patch_zeroclaw_autonomy_config(
         content,
         flags=re.MULTILINE,
     )
+
+    if relax_shell_commands:
+        content = re.sub(
+            r"^allowed_commands\s*=\s*\[[^\]]*\]",
+            'allowed_commands = ["*"]',
+            content,
+            flags=re.MULTILINE,
+        )
+        content = re.sub(
+            r"^block_high_risk_commands\s*=\s*true",
+            "block_high_risk_commands = false",
+            content,
+            flags=re.MULTILINE,
+        )
 
     # Increase max_actions_per_hour for eval
     content = re.sub(
