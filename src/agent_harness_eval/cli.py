@@ -54,17 +54,20 @@ def _create_parser() -> argparse.ArgumentParser:
         prog="agent-harness-eval",
         description="Agent Harness Evaluation Framework",
     )
-    parser.add_argument(
-        "--config",
-        "-c",
-        type=str,
-        default=None,
-        help="Path to eval.yaml config file (default: ./eval.yaml)",
-    )
     subparsers = parser.add_subparsers(dest="command")
+
+    # Shared config argument — added to each subparser instead of the top-level
+    # parser so users write `agent-harness-eval run --config ...` (idiomatic)
+    # rather than `agent-harness-eval --config ... run`.
+    _config_kwargs: dict[str, object] = {
+        "type": str,
+        "default": None,
+        "help": "Path to eval.yaml config file (default: ./eval.yaml)",
+    }
 
     # Run command
     run_parser = subparsers.add_parser("run", help="Run evaluation")
+    run_parser.add_argument("--config", "-c", **_config_kwargs)  # type: ignore[arg-type]
     run_parser.add_argument(
         "--model",
         type=str,
@@ -89,6 +92,7 @@ def _create_parser() -> argparse.ArgumentParser:
 
     # Report command
     report_parser = subparsers.add_parser("report", help="Generate reports from results")
+    report_parser.add_argument("--config", "-c", **_config_kwargs)  # type: ignore[arg-type]
     report_parser.add_argument("--input", type=str, required=True, help="Path to runs.jsonl")
     report_parser.add_argument("--output", type=str, help="Output directory")
     report_parser.add_argument("--judge-model", type=str, help="Model for judge graders (provider:model)")

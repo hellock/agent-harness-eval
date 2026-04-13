@@ -15,7 +15,7 @@ cp .env.example .env
 # Edit .env with your API keys
 
 uv sync                          # install dependencies
-agent-harness-eval --config eval.local.yaml run
+agent-harness-eval run --config eval.local.yaml
 ```
 
 ## Features
@@ -185,7 +185,7 @@ Minimal Docker evaluation flow:
 # 1. Configure eval.local.yaml with executor: docker
 # 2. Ensure Docker is running
 # 3. Start an evaluation
-agent-harness-eval --config eval.local.yaml run
+agent-harness-eval run --config eval.local.yaml
 ```
 
 Optional Docker-specific environment flags:
@@ -204,34 +204,33 @@ Use the host executor when you want faster local iteration and Docker when you w
 
 ```bash
 # Full evaluation (all harnesses from your local config)
-agent-harness-eval --config eval.local.yaml run
+agent-harness-eval run --config eval.local.yaml
 
 # Full evaluation in Docker
-agent-harness-eval --config eval.local.yaml run   # with executor: docker in eval.local.yaml
+agent-harness-eval run --config eval.local.yaml   # with executor: docker in eval.local.yaml
 
 # Single task, single harness
-agent-harness-eval --config eval.local.yaml run --task security.01 --harness claude-code
+agent-harness-eval run --config eval.local.yaml --task security.01 --harness claude-code
 
 # Specific categories
-agent-harness-eval --config eval.local.yaml run --category reasoning,memory
+agent-harness-eval run --config eval.local.yaml --category reasoning,memory
 
 # Different model
-agent-harness-eval --config eval.local.yaml run --model openai:gpt-5.4
+agent-harness-eval run --config eval.local.yaml --model openai:gpt-5.4
 
 # Multi-model matrix
-agent-harness-eval --config eval.local.yaml run --model anthropic:claude-sonnet-4-6,openai:gpt-5.4
+agent-harness-eval run --config eval.local.yaml --model anthropic:claude-sonnet-4-6,openai:gpt-5.4
 
 # Regenerate reports from existing results
-agent-harness-eval --config eval.local.yaml report --input results/<run-dir>/data/runs.jsonl
+agent-harness-eval report --config eval.local.yaml --input results/<run-dir>/data/runs.jsonl
 ```
 
 ### CLI Options
 
 ```
-agent-harness-eval [global options] run [options]
+agent-harness-eval run [options]
 
   --config, -c <path>      Path to eval config file (default: ./eval.yaml)
-
   --model <spec>            Model spec(s), comma-separated (provider:model format)
   --harness <list>          Comma-separated harnesses
   --runs <n>                Runs per task per harness (default: 1)

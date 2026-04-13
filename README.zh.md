@@ -15,7 +15,7 @@ cp .env.example .env
 # 在 .env 中填入你的 API 密钥
 
 uv sync                          # 安装依赖
-agent-harness-eval --config eval.local.yaml run
+agent-harness-eval run --config eval.local.yaml
 ```
 
 ## 特性
@@ -185,7 +185,7 @@ harnesses:
 # 1. 在 eval.local.yaml 里设置 executor: docker
 # 2. 确保 Docker 已启动
 # 3. 启动评测
-agent-harness-eval --config eval.local.yaml run
+agent-harness-eval run --config eval.local.yaml
 ```
 
 可选的 Docker 相关环境变量：
@@ -204,34 +204,33 @@ EVAL_DOCKER_NETWORK_NONE=1
 
 ```bash
 # 完整评估（使用本地配置中的所有 harness）
-agent-harness-eval --config eval.local.yaml run
+agent-harness-eval run --config eval.local.yaml
 
 # 使用 Docker 完整评估
-agent-harness-eval --config eval.local.yaml run   # 前提是 eval.local.yaml 中设置了 executor: docker
+agent-harness-eval run --config eval.local.yaml   # 前提是 eval.local.yaml 中设置了 executor: docker
 
 # 单任务，单 harness
-agent-harness-eval --config eval.local.yaml run --task security.01 --harness claude-code
+agent-harness-eval run --config eval.local.yaml --task security.01 --harness claude-code
 
 # 指定类别
-agent-harness-eval --config eval.local.yaml run --category reasoning,memory
+agent-harness-eval run --config eval.local.yaml --category reasoning,memory
 
 # 不同模型
-agent-harness-eval --config eval.local.yaml run --model openai:gpt-5.4
+agent-harness-eval run --config eval.local.yaml --model openai:gpt-5.4
 
 # 多模型矩阵
-agent-harness-eval --config eval.local.yaml run --model anthropic:claude-sonnet-4-6,openai:gpt-5.4
+agent-harness-eval run --config eval.local.yaml --model anthropic:claude-sonnet-4-6,openai:gpt-5.4
 
 # 从已有结果重新生成报告
-agent-harness-eval --config eval.local.yaml report --input results/<run-dir>/data/runs.jsonl
+agent-harness-eval report --config eval.local.yaml --input results/<run-dir>/data/runs.jsonl
 ```
 
 ### CLI 选项
 
 ```
-agent-harness-eval [全局选项] run [选项]
+agent-harness-eval run [选项]
 
   --config, -c <path>      配置文件路径（默认：./eval.yaml）
-
   --model <spec>            模型规格，逗号分隔（provider:model 格式）
   --harness <list>          逗号分隔的 harness 列表
   --runs <n>                每个任务每个 harness 的运行次数（默认：1）
