@@ -33,6 +33,11 @@ class ProviderConfig:
     api_key: str
     api_format: ApiFormat = "openai-chat-completions"
     extra_headers: dict[str, str] | None = None
+    # Max concurrent adapter sessions allowed against this provider. 0 = unbounded.
+    # Bounds "how many harness runs may be hitting this provider at once" — useful when
+    # the relay has session / QPS limits. Individual HTTP requests inside a session are
+    # not throttled (would require per-HTTP-call instrumentation inside each adapter).
+    max_concurrency: int = 0
 
     @property
     def is_openai_compat(self) -> bool:
@@ -132,6 +137,8 @@ def resolve_providers(
         if headers is not None and not isinstance(headers, dict):
             raise ValueError(f"Provider {name!r} headers must be a mapping.")
 
+        max_concurrency = _parse_provider_max_concurrency(name, config)
+
         providers[name] = ProviderConfig(
             base_url=_normalize_provider_base_url(
                 base_url,
@@ -141,9 +148,27 @@ def resolve_providers(
             api_key=api_key,
             api_format=api_format,
             extra_headers={str(k): str(v) for k, v in headers.items()} if headers else None,
+            max_concurrency=max_concurrency,
         )
 
     return providers
+
+
+def _parse_provider_max_concurrency(name: str, config: dict[str, Any]) -> int:
+    """Parse ``providers.<name>.max_concurrency`` from eval.yaml.
+
+    0 (the default) means unbounded. Negative values are rejected.
+    """
+    raw = config.get("max_concurrency")
+    if raw is None:
+        return 0
+    try:
+        value = int(raw)
+    except (TypeError, ValueError) as err:
+        raise ValueError(f"Provider {name!r} max_concurrency must be an integer, got {raw!r}.") from err
+    if value < 0:
+        raise ValueError(f"Provider {name!r} max_concurrency must be >= 0, got {value}.")
+    return value
 
 
 def _normalize_api_format(api_format: str, *, source: str) -> str:

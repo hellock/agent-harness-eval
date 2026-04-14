@@ -81,6 +81,11 @@ class EvalConfig:
     task_filter: dict[str, Any] | None = None
     output_dir: str = ""
     timeout_sec: int = 1800
+    # When ``runs_per_task > 1``, append a unique nonce to ``user_query`` per run so
+    # providers with response-level or prompt-level caching can't return an earlier
+    # run's reply for the same prompt. Default True — set False only if you want to
+    # intentionally test cache behavior.
+    runs_bust_cache: bool = True
 
 
 def run_result_from_dict(data: dict[str, Any]) -> RunResult:

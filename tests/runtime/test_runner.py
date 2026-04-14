@@ -14,12 +14,13 @@ from agent_harness_eval.config.runtime import RuntimeConfig
 from agent_harness_eval.executor import ExecutionPolicy, Executor
 from agent_harness_eval.graders.specs import GraderResult
 from agent_harness_eval.runner import (
+    RunPlanItem,
     RunRequest,
-    TaskRunGroup,
     _build_task_plan,
     _check_adapter_support,
     _execute_single_run,
     _finalize_prepared_run,
+    _inject_cache_bust_nonce,
     _persist_run_result,
     _recover_existing_results,
 )
@@ -148,15 +149,22 @@ def _make_result(task_id: str = "coding.01", *, status: str = "completed") -> Ru
     )
 
 
-def test_build_task_plan_skips_only_fully_recovered_groups() -> None:
+def test_build_task_plan_flattens_to_run_task_model_harness_tuples() -> None:
+    """Plan is a flat list with run_index outermost and completed items filtered out.
+
+    Ordering matters: run_index outermost guarantees all run=0 work is enqueued before
+    any run=1 work, so two runs of the same (task, model, harness) are separated in
+    time by an entire round of the other axes (defeats provider response caches).
+    """
     task_one = Task(id="coding.01", category="coding", description="one", user_query="q1")
     task_two = Task(id="coding.02", category="coding", description="two", user_query="q2")
+    model = ModelSpec(provider="anthropic", model="claude-sonnet-4-6")
     config = EvalConfig(
-        model_spec=ModelSpec(provider="anthropic", model="claude-sonnet-4-6"),
+        model_spec=model,
         harnesses=["openclaw", "codex"],
         runs_per_task=2,
     )
-    models = [config.model_spec]
+    models = [model]
     all_results = [
         RunResult(
             task_id="coding.01",
@@ -190,10 +198,49 @@ def test_build_task_plan_skips_only_fully_recovered_groups() -> None:
     plan = _build_task_plan(config, [task_one, task_two], models, all_results)
 
     assert plan == [
-        TaskRunGroup(task=task_one, model_label="anthropic:claude-sonnet-4-6", run_index=1),
-        TaskRunGroup(task=task_two, model_label="anthropic:claude-sonnet-4-6", run_index=0),
-        TaskRunGroup(task=task_two, model_label="anthropic:claude-sonnet-4-6", run_index=1),
+        # run=0 — task_one is fully recovered, only task_two remains
+        RunPlanItem(task=task_two, model_spec=model, run_index=0, harness="openclaw"),
+        RunPlanItem(task=task_two, model_spec=model, run_index=0, harness="codex"),
+        # run=1 — task_one/openclaw already done; everything else missing
+        RunPlanItem(task=task_one, model_spec=model, run_index=1, harness="codex"),
+        RunPlanItem(task=task_two, model_spec=model, run_index=1, harness="openclaw"),
+        RunPlanItem(task=task_two, model_spec=model, run_index=1, harness="codex"),
     ]
+
+
+def test_build_task_plan_orders_all_run_zero_before_any_run_one() -> None:
+    """Nothing recovered — entire plan should have run=0 grouped ahead of run=1."""
+    task_one = Task(id="t1", category="coding", description="", user_query="q")
+    task_two = Task(id="t2", category="coding", description="", user_query="q")
+    model = ModelSpec(provider="anthropic", model="m")
+    config = EvalConfig(
+        model_spec=model,
+        harnesses=["h1", "h2"],
+        runs_per_task=2,
+    )
+
+    plan = _build_task_plan(config, [task_one, task_two], [model], all_results=[])
+
+    run_indexes = [item.run_index for item in plan]
+    assert run_indexes == [0, 0, 0, 0, 1, 1, 1, 1], run_indexes
+
+
+def test_inject_cache_bust_nonce_appends_marker_preserving_other_fields() -> None:
+    original = Task(
+        id="x",
+        category="coding",
+        description="d",
+        user_query="please do X",
+        timeout_sec=42,
+    )
+    nonced = _inject_cache_bust_nonce(original, run_id="abcdef1234567890-uuid")
+
+    assert nonced.id == "x"
+    assert nonced.timeout_sec == 42
+    assert nonced.user_query.startswith("please do X")
+    assert "<!-- eval-nonce: abcdef123456 -->" in nonced.user_query
+    # Original unchanged (we return a new Task, not a mutation)
+    assert original.user_query == "please do X"
 
 
 def test_check_adapter_support_flags_native_memory_and_conversation_history(
@@ -270,6 +317,7 @@ async def test_persist_and_recover_run_result_round_trip(
             prepared=_make_prepared_run(isolated_run_dir),
             run_result=result,
         ),
+        model_spec=ModelSpec(provider="anthropic", model="claude-sonnet-4-6"),
         model_label="anthropic:claude-sonnet-4-6",
         run_index=0,
         run_id="run-1",
@@ -336,6 +384,7 @@ async def test_execute_single_run_restores_workspace_before_grading(
             task=task,
             harness="fake",
             adapter=adapter,
+            model_spec=ModelSpec(provider="anthropic", model="claude-sonnet-4-6"),
             model_label="anthropic:claude-sonnet-4-6",
             run_index=0,
             run_id="run-restore",
@@ -350,7 +399,8 @@ async def test_execute_single_run_restores_workspace_before_grading(
     assert restore_calls == [prepared.workspace_dir]
 
 
-def test_finalize_prepared_run_keeps_workspace_on_failure(
+@pytest.mark.asyncio
+async def test_finalize_prepared_run_keeps_workspace_on_failure(
     isolated_run_dir: Path,
 ) -> None:
     task = Task(id="coding.01", category="coding", description="keep", user_query="q")
@@ -365,7 +415,7 @@ def test_finalize_prepared_run_keeps_workspace_on_failure(
     trace_dir = isolated_run_dir / "trace-keep"
     trace_dir.mkdir()
 
-    _finalize_prepared_run(
+    await _finalize_prepared_run(
         adapter=adapter,
         prepared=prepared,
         result=_make_result(status="failed"),
@@ -378,7 +428,8 @@ def test_finalize_prepared_run_keeps_workspace_on_failure(
     assert Path(prepared.layout.root_dir).exists()
 
 
-def test_finalize_prepared_run_cleans_workspace_on_success(
+@pytest.mark.asyncio
+async def test_finalize_prepared_run_cleans_workspace_on_success(
     isolated_run_dir: Path,
 ) -> None:
     task = Task(id="coding.01", category="coding", description="cleanup", user_query="q")
@@ -394,7 +445,7 @@ def test_finalize_prepared_run_cleans_workspace_on_success(
     trace_dir = isolated_run_dir / "trace-clean"
     trace_dir.mkdir()
 
-    _finalize_prepared_run(
+    await _finalize_prepared_run(
         adapter=adapter,
         prepared=prepared,
         result=_make_result(),
@@ -426,6 +477,7 @@ async def test_execute_single_run_wraps_prepare_errors_as_failed_results(
             task=task,
             harness="fake",
             adapter=adapter,
+            model_spec=ModelSpec(provider="anthropic", model="claude-sonnet-4-6"),
             model_label="anthropic:claude-sonnet-4-6",
             run_index=0,
             run_id="run-prepare-error",

@@ -14,6 +14,10 @@
 #     api_format: anthropic
 #     headers:
 #       x-relay-org: your-org
+#     # Cap concurrent adapter sessions hitting this provider. Leave unset (or 0)
+#     # for unbounded. Use this when your relay has session / QPS limits and you
+#     # want to avoid 429s cascading into retries.
+#     max_concurrency: 10
 
 # ─── Model selection ───
 # provider + model are separate fields. The provider names a configured
@@ -35,9 +39,14 @@ judge_model:
 
 # Runtime settings
 executor: host                 # required: host or docker
-concurrency: 1                 # max concurrent tasks
+concurrency: 1                 # max concurrent runs (flattened across task x model x run x harness)
 runs: 1                        # runs per task
 timeout: 600                   # per-task timeout in seconds
+
+# When runs > 1, append a per-run nonce to user_query so providers that cache
+# responses keyed on the full prompt can't return the same answer twice. Default
+# true. Set to false only if you specifically want to observe cache behavior.
+# runs_bust_cache: true
 
 # ─── Harness Config ───
 # Each harness can specify:

@@ -272,3 +272,138 @@ def test_eval_yaml_accepts_models_matrix(
     assert len(config["models"]) == 2
     assert config["models"][0]["provider"] == "anthropic"
     assert config["models"][1]["model"] == "gpt-5.4"
+
+
+def test_provider_config_parses_max_concurrency_from_yaml(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """providers.<name>.max_concurrency feeds ProviderConfig.max_concurrency."""
+    eval_yaml = tmp_path / "eval.yaml"
+    eval_yaml.write_text(
+        "\n".join(
+            [
+                "provider: relay",
+                "model: claude-sonnet-4-6",
+                "executor: host",
+                "providers:",
+                "  relay:",
+                '    base_url: "http://relay.example"',
+                '    api_format: "anthropic"',
+                "    max_concurrency: 5",
+            ]
+        )
+        + "\n"
+    )
+    clear_cache()
+    monkeypatch.setenv("EVAL_PROVIDER_RELAY_API_KEY", "relay-key")
+
+    config = load_eval_yaml(str(eval_yaml))
+    rc = build_runtime_config(tmp_path, config)
+    provider = rc.providers["relay"]
+
+    assert provider.max_concurrency == 5
+
+
+def test_provider_config_defaults_max_concurrency_to_zero_unbounded(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    eval_yaml = tmp_path / "eval.yaml"
+    eval_yaml.write_text(
+        "\n".join(
+            [
+                "provider: relay",
+                "model: claude-sonnet-4-6",
+                "executor: host",
+                "providers:",
+                "  relay:",
+                '    base_url: "http://relay.example"',
+                '    api_format: "anthropic"',
+            ]
+        )
+        + "\n"
+    )
+    clear_cache()
+    monkeypatch.setenv("EVAL_PROVIDER_RELAY_API_KEY", "relay-key")
+
+    config = load_eval_yaml(str(eval_yaml))
+    rc = build_runtime_config(tmp_path, config)
+
+    assert rc.providers["relay"].max_concurrency == 0
+
+
+def test_provider_config_rejects_negative_max_concurrency(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    eval_yaml = tmp_path / "eval.yaml"
+    eval_yaml.write_text(
+        "\n".join(
+            [
+                "provider: relay",
+                "model: claude-sonnet-4-6",
+                "executor: host",
+                "providers:",
+                "  relay:",
+                '    base_url: "http://relay.example"',
+                '    api_format: "anthropic"',
+                "    max_concurrency: -1",
+            ]
+        )
+        + "\n"
+    )
+    clear_cache()
+    monkeypatch.setenv("EVAL_PROVIDER_RELAY_API_KEY", "relay-key")
+
+    config = load_eval_yaml(str(eval_yaml))
+    with pytest.raises(ValueError, match="max_concurrency must be >= 0"):
+        build_runtime_config(tmp_path, config)
+
+
+@pytest.mark.asyncio
+async def test_provider_slot_bounds_concurrent_sessions(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """provider_slot hands out a Semaphore capped at max_concurrency; lazy-singleton."""
+    import asyncio
+
+    eval_yaml = tmp_path / "eval.yaml"
+    eval_yaml.write_text(
+        "\n".join(
+            [
+                "provider: relay",
+                "model: claude-sonnet-4-6",
+                "executor: host",
+                "providers:",
+                "  relay:",
+                '    base_url: "http://relay.example"',
+                '    api_format: "anthropic"',
+                "    max_concurrency: 2",
+            ]
+        )
+        + "\n"
+    )
+    clear_cache()
+    monkeypatch.setenv("EVAL_PROVIDER_RELAY_API_KEY", "relay-key")
+
+    config = load_eval_yaml(str(eval_yaml))
+    rc = build_runtime_config(tmp_path, config)
+
+    inside = 0
+    peak = 0
+
+    async def worker() -> None:
+        nonlocal inside, peak
+        async with rc.provider_slot("relay"):
+            inside += 1
+            peak = max(peak, inside)
+            await asyncio.sleep(0.02)
+            inside -= 1
+
+    await asyncio.gather(*(worker() for _ in range(6)))
+
+    assert peak == 2, f"expected semaphore to cap at 2, saw peak={peak}"
+    # Second access returns the same semaphore instance (lazy singleton, not per-call).
+    assert rc.provider_slot("relay") is rc.provider_slot("relay")

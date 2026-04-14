@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -29,6 +31,9 @@ class RuntimeConfig:
     providers: dict[str, ProviderConfig] = field(default_factory=dict)
     harness_config: dict[str, dict[str, Any]] = field(default_factory=dict)
     _process_env: dict[str, str] = field(default_factory=dict, repr=False)
+    # Lazily-created semaphores keyed by provider name. Populated on first access in
+    # ``provider_slot`` so semaphores bind to the active event loop at runtime.
+    _provider_semaphores: dict[str, asyncio.Semaphore] = field(default_factory=dict, repr=False, compare=False)
 
     @property
     def state_dir(self) -> Path:
@@ -57,6 +62,27 @@ class RuntimeConfig:
     def subprocess_env(self) -> dict[str, str]:
         """Env dict for subprocesses, copied from the bootstrap snapshot."""
         return dict(self._process_env)
+
+    def provider_slot(
+        self, provider_name: str
+    ) -> contextlib.AbstractAsyncContextManager[Any] | contextlib.AbstractContextManager[Any]:
+        """Return an async context manager that bounds concurrent sessions per provider.
+
+        Reads ``max_concurrency`` from the provider's :class:`ProviderConfig`. When the
+        field is 0 (default / unbounded) this returns a no-op ``nullcontext``; otherwise
+        it returns a lazily-created :class:`asyncio.Semaphore` keyed by provider name.
+
+        The semaphore is created on first access so it binds to whichever event loop is
+        running. It is *not* pickled as part of the frozen RuntimeConfig's identity.
+        """
+        provider = self.providers.get(provider_name)
+        if provider is None or provider.max_concurrency <= 0:
+            return contextlib.nullcontext()
+        sem = self._provider_semaphores.get(provider_name)
+        if sem is None:
+            sem = asyncio.Semaphore(provider.max_concurrency)
+            self._provider_semaphores[provider_name] = sem
+        return sem
 
 
 def build_runtime_config(

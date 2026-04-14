@@ -247,6 +247,9 @@ def _build_run_eval_config(
         harness_str = default_harness_list
     requested_harnesses: list[str] = [s.strip() for s in harness_str.split(",")]
 
+    runs_bust_cache_raw = eval_yaml.get("runs_bust_cache")
+    runs_bust_cache = bool(runs_bust_cache_raw) if runs_bust_cache_raw is not None else True
+
     return EvalConfig(
         model_spec=model_specs[0],
         models=model_specs,
@@ -262,6 +265,7 @@ def _build_run_eval_config(
         },
         output_dir="",
         timeout_sec=args.timeout or int(eval_yaml["timeout"]),
+        runs_bust_cache=runs_bust_cache,
     )
 
 

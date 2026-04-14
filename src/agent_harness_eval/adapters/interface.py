@@ -111,22 +111,36 @@ class HarnessAdapter(ABC):
         self.runtime_config = runtime_config
         self.executor = executor
 
-    def resolve_provider(self, model_spec: ModelSpec) -> ProviderConfig:
-        """Resolve the effective provider for this adapter and model.
+    def resolve_provider_name(self, model_spec: ModelSpec) -> str:
+        """Return the configured provider name this adapter+model resolves to.
 
         Resolution order:
           1. ``harnesses.<name>.provider`` override in eval.yaml
           2. ``model_spec.provider`` (from the top-level or matrix entry)
 
-        Raises immediately if the provider is missing or its ``api_format``
-        does not match this adapter's ``supported_api_formats``.
+        This does not validate that the provider exists or that its api_format is
+        compatible — use :meth:`resolve_provider` for that. The bare name is what we
+        need to key a concurrency semaphore by.
         """
         yaml_key = _harness_config_key(self.name)
         harness_cfg = (
             self.runtime_config.harness_config.get(yaml_key) or self.runtime_config.harness_config.get(self.name) or {}
         )
         override_name = harness_cfg.get("provider")
-        provider_name = str(override_name).strip() if override_name else model_spec.provider
+        return str(override_name).strip() if override_name else model_spec.provider
+
+    def resolve_provider(self, model_spec: ModelSpec) -> ProviderConfig:
+        """Resolve the effective provider for this adapter and model.
+
+        Raises immediately if the provider is missing or its ``api_format``
+        does not match this adapter's ``supported_api_formats``.
+        """
+        provider_name = self.resolve_provider_name(model_spec)
+        yaml_key = _harness_config_key(self.name)
+        harness_cfg = (
+            self.runtime_config.harness_config.get(yaml_key) or self.runtime_config.harness_config.get(self.name) or {}
+        )
+        override_name = harness_cfg.get("provider")
 
         provider = self.runtime_config.providers.get(provider_name)
         if not provider:

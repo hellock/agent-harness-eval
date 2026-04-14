@@ -424,7 +424,7 @@ async def _probe_harness(
         )
 
         try:
-            prepared = adapter.prepare(per_run_task, run_id)
+            prepared = await asyncio.to_thread(adapter.prepare, per_run_task, run_id)
         except Exception as error:
             detail = str(error)
             failure = detect_failure_origin_from_error(detail)
@@ -443,7 +443,9 @@ async def _probe_harness(
             break  # prepare failures are not retryable
 
         try:
-            run_result = await adapter.run(prepared, model_spec.label)
+            provider_name = adapter.resolve_provider_name(model_spec)
+            async with runtime_config.provider_slot(provider_name):
+                run_result = await adapter.run(prepared, model_spec.label)
             trace_events = len(run_result.trace)
             tool_calls = run_result.metrics.tool_calls
 
@@ -548,7 +550,7 @@ async def _probe_harness(
         finally:
             if prepared:
                 try:
-                    adapter.cleanup(prepared)
+                    await asyncio.to_thread(adapter.cleanup, prepared)
                 except Exception as cleanup_error:
                     results.append(
                         HarnessPreflightResult(

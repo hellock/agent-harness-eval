@@ -67,10 +67,19 @@ async def _map_with_concurrency(
 
 
 @dataclass(frozen=True, slots=True)
-class TaskRunGroup:
+class RunPlanItem:
+    """One unit of work in the flattened eval plan.
+
+    The plan is flattened across ``(run_index, task, model, harness)`` so a single
+    bounded-concurrency worker pool controls the entire eval's parallelism. See
+    :func:`_build_task_plan` for the iteration order and its rationale (run_index is
+    outermost so same-prompt runs are separated in time to defeat provider caches).
+    """
+
     task: Task
-    model_label: str
+    model_spec: ModelSpec
     run_index: int
+    harness: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +87,7 @@ class RunRequest:
     task: Task
     harness: str
     adapter: HarnessAdapter
+    model_spec: ModelSpec
     model_label: str
     run_index: int
     run_id: str
@@ -237,7 +247,7 @@ def _check_adapter_support(
     return skip_reasons
 
 
-def _finalize_prepared_run(
+async def _finalize_prepared_run(
     *,
     adapter: HarnessAdapter,
     prepared: PreparedRun | None,
@@ -245,17 +255,24 @@ def _finalize_prepared_run(
     trace_dir: str,
     keep_workspace: str,
 ) -> None:
+    """Persist debug artifacts and clean up the workspace.
+
+    The sync filesystem work (``shutil.copytree`` for debug artifacts,
+    ``shutil.rmtree`` inside ``adapter.cleanup``) is offloaded to the default
+    thread pool so it doesn't block the event loop while other concurrent runs
+    are active.
+    """
     if not prepared:
         return
 
-    _persist_debug_artifacts(prepared, trace_dir)
+    await asyncio.to_thread(_persist_debug_artifacts, prepared, trace_dir)
 
     any_fail = result.status != "completed" or any(not grader.passed for grader in result.grader_results)
     should_keep = keep_workspace == "always" or (keep_workspace == "on_failure" and any_fail)
 
     if not should_keep:
         try:
-            adapter.cleanup(prepared)
+            await asyncio.to_thread(adapter.cleanup, prepared)
         except Exception:
             pass
         return
@@ -276,8 +293,13 @@ async def _prepare_run(
     harness: str,
     runtime_config: RuntimeConfig,
 ) -> PreparedRun:
-    """Prepare the workspace: adapter.prepare + prepare_commands."""
-    prepared = adapter.prepare(task, run_id)
+    """Prepare the workspace: adapter.prepare + prepare_commands.
+
+    ``adapter.prepare`` is sync and can do heavy filesystem work (``shutil.copytree``,
+    many ``mkdir``/file writes for ``workspace_files``). Offloading to a thread keeps
+    the event loop responsive while other concurrent runs progress.
+    """
+    prepared = await asyncio.to_thread(adapter.prepare, task, run_id)
 
     if task.prepare_commands:
         await _run_prepare_commands(
@@ -309,15 +331,19 @@ def _install_run_memory(
 async def _execute_and_grade(
     adapter: HarnessAdapter,
     prepared: PreparedRun,
+    model_spec: ModelSpec,
     model_label: str,
     run_id: str,
     run_index: int,
     task: Task,
     judge_llm: JudgeLLM | None,
     pricing_override: ModelPricing | None,
+    runtime_config: RuntimeConfig,
 ) -> RunResult:
     """Run the adapter, compute cost, and grade the result."""
-    result = await adapter.run(prepared, model_label)
+    provider_name = adapter.resolve_provider_name(model_spec)
+    async with runtime_config.provider_slot(provider_name):
+        result = await adapter.run(prepared, model_label)
     result.model = model_label
     result.run_id = run_id
     result.run_index = run_index
@@ -378,7 +404,7 @@ async def _execute_and_grade(
     return result
 
 
-def _finalize_run(
+async def _finalize_run(
     adapter: HarnessAdapter,
     prepared: PreparedRun | None,
     result: RunResult,
@@ -386,7 +412,7 @@ def _finalize_run(
     runtime_config: RuntimeConfig,
 ) -> None:
     """Persist debug artifacts and clean up the workspace."""
-    _finalize_prepared_run(
+    await _finalize_prepared_run(
         adapter=adapter,
         prepared=prepared,
         result=result,
@@ -405,6 +431,7 @@ async def _execute_single_run(
     task = request.task
     harness = request.harness
     adapter = request.adapter
+    model_spec = request.model_spec
     model_label = request.model_label
     run_index = request.run_index
     run_id = request.run_id
@@ -453,12 +480,14 @@ async def _execute_single_run(
         result = await _execute_and_grade(
             adapter,
             prepared,
+            model_spec,
             model_label,
             run_id,
             run_index,
             task,
             judge_llm,
             pricing_override,
+            runtime_config,
         )
 
         return result
@@ -478,7 +507,7 @@ async def _execute_single_run(
         return result
     finally:
         if result is not None:
-            _finalize_run(
+            await _finalize_run(
                 adapter=adapter,
                 prepared=prepared,
                 result=result,
@@ -494,7 +523,14 @@ async def execute_eval(
     judge_llm: JudgeLLM | None,
     runtime_config: RuntimeConfig,
 ) -> list[RunResult]:
-    """Execute the full evaluation."""
+    """Execute the full evaluation.
+
+    The plan is flattened across ``(run_index, task, model, harness)`` so a single
+    ``max_concurrency`` knob bounds total parallelism — no more unbounded inner gather
+    over ``harnesses``. Ordering puts ``run_index`` outermost so that two runs of the
+    same prompt are separated in time by an entire round of the other axes, which
+    mitigates provider response caching between runs.
+    """
     output_dir = config.output_dir
     os.makedirs(output_dir, exist_ok=True)
     data_dir = os.path.join(output_dir, "data")
@@ -516,9 +552,8 @@ async def execute_eval(
         if h not in adapters:
             raise RuntimeError(f"Missing adapter: {h}")
 
-    total_runs = len(task_plan) * len(config.harnesses)
     print(
-        f"Run plan: {total_runs} runs ({len(config.harnesses)} harnesses x "
+        f"Run plan: {len(task_plan)} runs ({len(config.harnesses)} harnesses x "
         f"{len(models)} model{'s' if len(models) > 1 else ''} x {len(tasks)} tasks x "
         f"{config.runs_per_task} run(s), concurrency={config.max_concurrency})"
     )
@@ -526,64 +561,89 @@ async def execute_eval(
 
     results_lock = asyncio.Lock()
 
-    async def run_task_group(task_run: TaskRunGroup, _idx: int) -> None:
-        task = task_run.task.materialize()
-        model_label = task_run.model_label
-        run_index = task_run.run_index
+    async def run_one_item(item: RunPlanItem, _idx: int) -> None:
+        task = item.task.materialize()
+        model_spec = item.model_spec
+        model_label = model_spec.label
+        run_index = item.run_index
+        harness = item.harness
+        adapter = adapters[harness]
 
-        async def run_harness(harness: str) -> RunResult | None:
-            already_done = any(
-                r.harness == harness and r.task_id == task.id and r.model == model_label and r.run_index == run_index
-                for r in all_results
-            )
-            if already_done:
-                return None
+        log_prefix = f"[{harness}/{model_label}]" if len(models) > 1 else f"[{harness}]"
+        print(f"{log_prefix} {task.id} run {run_index + 1}/{config.runs_per_task} starting...")
 
-            adapter = adapters.get(harness)
-            if not adapter:
-                return None
+        request_run_id = str(uuid.uuid4())
+        trace_dir = _build_trace_dir(output_dir, request_run_id)
+        os.makedirs(trace_dir, exist_ok=True)
 
-            log_prefix = f"[{harness}/{model_label}]" if len(models) > 1 else f"[{harness}]"
-            print(f"{log_prefix} {task.id} run {run_index + 1}/{config.runs_per_task} starting...")
+        # Inject a per-run nonce into the prompt so same-prompt runs bust any
+        # provider-side response / prompt caching. Only matters when runs_per_task > 1.
+        if config.runs_per_task > 1 and config.runs_bust_cache:
+            task = _inject_cache_bust_nonce(task, request_run_id)
 
-            trace_dir = _build_trace_dir(output_dir, request_run_id := str(uuid.uuid4()))
-            os.makedirs(trace_dir, exist_ok=True)
-            request = RunRequest(
-                task=task,
-                harness=harness,
-                adapter=adapter,
-                model_label=model_label,
-                run_index=run_index,
-                run_id=request_run_id,
-                trace_dir=trace_dir,
-            )
-            result = await _execute_single_run(
-                request=request,
-                judge_llm=judge_llm,
-                runtime_config=runtime_config,
-                pricing_override=pricing_override,
-            )
+        request = RunRequest(
+            task=task,
+            harness=harness,
+            adapter=adapter,
+            model_spec=model_spec,
+            model_label=model_label,
+            run_index=run_index,
+            run_id=request_run_id,
+            trace_dir=trace_dir,
+        )
+        result = await _execute_single_run(
+            request=request,
+            judge_llm=judge_llm,
+            runtime_config=runtime_config,
+            pricing_override=pricing_override,
+        )
 
-            await _persist_run_result(
-                request=request,
-                result=result,
-                trace_dir=trace_dir,
-                results_file=results_file,
-                trace_index_file=trace_index_file,
-                all_results=all_results,
-                results_lock=results_lock,
-            )
+        await _persist_run_result(
+            request=request,
+            result=result,
+            trace_dir=trace_dir,
+            results_file=results_file,
+            trace_index_file=trace_index_file,
+            all_results=all_results,
+            results_lock=results_lock,
+        )
 
-            pass_count = sum(1 for g in result.grader_results if g.passed)
-            total_count = len(result.grader_results)
-            print(f"{log_prefix} {task.id} run {run_index + 1}: {result.status} (graders: {pass_count}/{total_count})")
-            return result
+        pass_count = sum(1 for g in result.grader_results if g.passed)
+        total_count = len(result.grader_results)
+        print(f"{log_prefix} {task.id} run {run_index + 1}: {result.status} (graders: {pass_count}/{total_count})")
 
-        await asyncio.gather(*(run_harness(h) for h in config.harnesses))
-
-    await _map_with_concurrency(task_plan, config.max_concurrency, run_task_group)
+    await _map_with_concurrency(task_plan, config.max_concurrency, run_one_item)
 
     return all_results
+
+
+def _inject_cache_bust_nonce(task: Task, run_id: str) -> Task:
+    """Return a Task whose ``user_query`` ends with a unique per-run marker.
+
+    The marker is an HTML-style comment so models generally ignore it but any
+    cache keyed off the full prompt hash / prefix hash still sees a different
+    input. We keep it 12 chars of the run UUID — short enough to stay out of
+    the way, unique enough to defeat collision.
+    """
+    nonce = run_id[:12]
+    marker = f"\n\n<!-- eval-nonce: {nonce} -->"
+    return Task(
+        id=task.id,
+        category=task.category,
+        description=task.description,
+        user_query=task.user_query + marker,
+        graders=task.graders,
+        timeout_sec=task.timeout_sec,
+        task_dir=task.task_dir,
+        workspace_dir=task.workspace_dir,
+        workspace_files=task.workspace_files,
+        history_file=task.history_file,
+        conversation_history=task.conversation_history,
+        native_memory=task.native_memory,
+        memory_state=task.memory_state,
+        prepare_commands=task.prepare_commands,
+        tool_boundary=task.tool_boundary,
+    )
 
 
 def _recover_existing_results(results_file: str) -> list[RunResult]:
@@ -604,27 +664,33 @@ def _build_task_plan(
     tasks: list[Task],
     models: list[ModelSpec],
     all_results: list[RunResult],
-) -> list[TaskRunGroup]:
-    task_plan: list[TaskRunGroup] = []
-    for task in tasks:
-        for model_spec in models:
-            for run_index in range(config.runs_per_task):
-                any_remaining = any(
-                    not any(
-                        r.harness == harness
-                        and r.task_id == task.id
-                        and r.model == model_spec.label
-                        and r.run_index == run_index
-                        for r in all_results
-                    )
-                    for harness in config.harnesses
-                )
-                if any_remaining:
+) -> list[RunPlanItem]:
+    """Flatten the eval space into ``(task, model, run, harness)`` work items.
+
+    Iteration order: ``run_index`` outermost, then task, model, harness. That means
+    all of run=0 completes before any of run=1 starts (once concurrency admits them in
+    order), maximizing the wall-clock gap between two same-prompt runs. Short of
+    appending a nonce (see ``runs_bust_cache``), this is the single cheapest hedge
+    against provider-side prompt / response caches collapsing ``runs > 1`` into one
+    real sample plus N-1 replays.
+
+    Items already present in ``all_results`` are filtered out (resume-from-crash).
+    """
+    completed_keys: set[tuple[str, str, int, str]] = {(r.task_id, r.model, r.run_index, r.harness) for r in all_results}
+
+    task_plan: list[RunPlanItem] = []
+    for run_index in range(config.runs_per_task):
+        for task in tasks:
+            for model_spec in models:
+                for harness in config.harnesses:
+                    if (task.id, model_spec.label, run_index, harness) in completed_keys:
+                        continue
                     task_plan.append(
-                        TaskRunGroup(
+                        RunPlanItem(
                             task=task,
-                            model_label=model_spec.label,
+                            model_spec=model_spec,
                             run_index=run_index,
+                            harness=harness,
                         )
                     )
     return task_plan
