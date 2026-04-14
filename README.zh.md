@@ -54,7 +54,7 @@ uv sync                # 安装评测框架本身
 | OpenClaw | 2026.4.5 | ✅ | ✅ |
 | Claude Code | 2.1.92 | ✅ | ✅ |
 | Nanobot | 0.1.5 | ✅ | ✅ |
-| ZeroClaw | 0.6.8 | ✅ | ✅ |
+| ZeroClaw | 0.6.9 | ✅ | ✅ |
 | Hermes Agent | 0.8.0 | ✅ | ✅ |
 | Codex | 0.118.0 | ✅ | ✅ |
 

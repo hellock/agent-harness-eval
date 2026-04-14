@@ -82,7 +82,7 @@ def test_generate_reports_single_model_writes_expected_files_and_summary_metadat
         executor_backend="docker",
         harness_config={
             "codex": {"version": "0.118.0"},
-            "zeroclaw": {"version": "0.6.8"},
+            "zeroclaw": {"version": "0.6.9"},
         },
     )
 
@@ -102,7 +102,7 @@ def test_generate_reports_single_model_writes_expected_files_and_summary_metadat
     summary = (output_dir / "reports" / "summary.md").read_text(encoding="utf-8")
     assert "**Executor:** docker" in summary
     assert "| Codex" in summary and "| 0.118.0" in summary
-    assert "| Zeroclaw" in summary and "| 0.6.8" in summary
+    assert "| Zeroclaw" in summary and "| 0.6.9" in summary
     assert "**Judge model:** `anthropic:claude-sonnet-4-6`" in summary
     assert "**Preflight:**" not in summary
     assert "Mean Time" in summary
