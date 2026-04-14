@@ -36,7 +36,7 @@ class ZeroClawAdapter(HarnessAdapter):
     name = "zeroclaw"
     managed_docker_image = True
 
-    required_env_vars: ClassVar[list[list[str]]] = [["ANTHROPIC_API_KEY"], ["OPENAI_API_KEY"]]
+    required_env_vars: ClassVar[list[list[str]]] = [["API_KEY"], ["ZEROCLAW_API_KEY"]]
 
     def prepare(self, task: Task, run_id: str) -> PreparedRun:
         layout = create_run_layout(run_id, workspace_files=task.workspace_files)
@@ -70,25 +70,21 @@ class ZeroClawAdapter(HarnessAdapter):
         # Resolve provider via harness override or model spec.
         provider = self.resolve_provider(model_spec)
 
-        # ZeroClaw uses `custom:<url>` for OpenAI-compatible relays and
-        # `anthropic-custom:<url>` for Anthropic-compatible relays.
-        # These provider IDs embed the base_url, so zeroclaw doesn't need
-        # separate base_url patching in config.toml.
+        # ZeroClaw uses `anthropic-custom:<url>` for Anthropic-compatible relays
+        # and `custom:<url>` for OpenAI-compatible relays.
         base = provider.base_url.rstrip("/")
         if provider.api_format == "anthropic":
             zc_provider_flag = f"anthropic-custom:{base}"
-            key_env = "ANTHROPIC_API_KEY"
         else:
             zc_provider_flag = f"custom:{base}"
-            key_env = "OPENAI_API_KEY"
 
         extra_env: dict[str, str] = {
             **prepared.env,
             "HOME": runtime_dir,
             "ZEROCLAW_WORKSPACE": workspace_dir,
-            key_env: provider.api_key,
+            "API_KEY": provider.api_key,
         }
-        passthrough = ["HOME", "ZEROCLAW_WORKSPACE", key_env]
+        passthrough = ["HOME", "ZEROCLAW_WORKSPACE", "API_KEY"]
 
         inner_env = filter_env(self.runtime_config.subprocess_env, extra_env, passthrough)
         zeroclaw_bin = self.resolve_binary()
@@ -152,10 +148,6 @@ class ZeroClawAdapter(HarnessAdapter):
             workspace_dir,
             relax_shell_commands=execution_policy.shell and self.runtime_config.executor_backend == "docker",
         )
-
-        # Inject api_key into config.toml — zeroclaw's anthropic-custom:
-        # provider reads the key from this field rather than ANTHROPIC_API_KEY.
-        _inject_zeroclaw_api_key(config_dir, provider.api_key)
 
         # Step 2: Agent
         agent_args = [
@@ -283,41 +275,6 @@ class ZeroClawAdapter(HarnessAdapter):
             shutil.rmtree(runtime_dir, ignore_errors=True)
         self.executor.restore_workspace(prepared.workspace_dir)
         remove_workspace(prepared.workspace_dir)
-
-
-def _inject_zeroclaw_api_key(config_dir: str, api_key: str) -> None:
-    """Write top-level ``api_key`` into config.toml.
-
-    ZeroClaw's ``anthropic-custom:`` / ``custom:`` providers read the key
-    from this top-level config field rather than standard env vars.
-    Only touches lines before the first ``[section]`` header.
-    """
-    cfg_path = os.path.join(config_dir, "config.toml")
-    if not os.path.exists(cfg_path):
-        return
-
-    with open(cfg_path) as f:
-        lines = f.readlines()
-
-    # Find insertion point: replace existing top-level api_key, or insert
-    # before the first [section] header.
-    replaced = False
-    first_section = len(lines)
-    for i, line in enumerate(lines):
-        stripped = line.strip()
-        if stripped.startswith("["):
-            first_section = i
-            break
-        if stripped.startswith("api_key"):
-            lines[i] = f'api_key = "{api_key}"\n'
-            replaced = True
-            break
-
-    if not replaced:
-        lines.insert(first_section, f'api_key = "{api_key}"\n')
-
-    with open(cfg_path, "w") as f:
-        f.writelines(lines)
 
 
 def _patch_zeroclaw_autonomy_config(

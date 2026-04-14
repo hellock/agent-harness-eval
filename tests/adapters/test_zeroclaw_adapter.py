@@ -88,13 +88,6 @@ async def test_zeroclaw_run_uses_onboard_then_agent_in_authoritative_workspace(
             '[security]\nlevel = "full"\n', encoding="utf-8"
         ),
     )
-    monkeypatch.setattr(
-        "agent_harness_eval.adapters.zeroclaw._inject_zeroclaw_api_key",
-        lambda config_dir_arg, api_key: (config_dir / "config.toml").write_text(
-            f'api_key = "{api_key}"\n', encoding="utf-8"
-        ),
-    )
-
     try:
         result = await adapter.run(prepared, "relay:claude-sonnet-4-6")
 
@@ -122,7 +115,7 @@ async def test_zeroclaw_run_uses_onboard_then_agent_in_authoritative_workspace(
 
         env = agent_call["inner_env"]
         assert isinstance(env, dict)
-        assert env["ANTHROPIC_API_KEY"] == "anthropic-key"
+        assert env["API_KEY"] == "anthropic-key"
         assert env["HOME"] == prepared.env["_EVAL_RUNTIME_DIR"]
         assert env["ZEROCLAW_WORKSPACE"] == prepared.workspace_dir
         assert config_dir == workspace_dir.parent / ".zeroclaw"
@@ -174,12 +167,6 @@ async def test_zeroclaw_run_returns_failed_result_when_trace_parse_fails(
         ),
     )
     monkeypatch.setattr(
-        "agent_harness_eval.adapters.zeroclaw._inject_zeroclaw_api_key",
-        lambda config_dir_arg, api_key: (config_dir / "config.toml").write_text(
-            f'api_key = "{api_key}"\n', encoding="utf-8"
-        ),
-    )
-    monkeypatch.setattr(
         "agent_harness_eval.adapters.zeroclaw._read_zeroclaw_runtime_trace",
         lambda trace_path: (_ for _ in ()).throw(ValueError("bad runtime trace")),
     )
@@ -194,6 +181,84 @@ async def test_zeroclaw_run_returns_failed_result_when_trace_parse_fails(
         assert len(executor.calls) == 2
         assert result.trace and result.trace[0].type == "task_failed"
         assert "ZeroClaw output parse error" in (result.trace[0].error or "")
+    finally:
+        adapter.cleanup(prepared)
+
+
+@pytest.mark.asyncio
+async def test_zeroclaw_run_uses_custom_provider_for_openai_compatible_relays(
+    isolated_run_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_config = RuntimeConfig(
+        project_root=isolated_run_dir,
+        providers={
+            "relay": ProviderConfig(
+                base_url="https://relay.example.com/v1",
+                api_key="relay-key",
+                api_format="openai-chat-completions",
+            )
+        },
+    )
+    executor = SequentialRecordingExecutor(
+        runtime_config,
+        [
+            SubprocessResult(stdout="", stderr="", exit_code=0, timed_out=False),
+            SubprocessResult(stdout="MINIMAX_OK", stderr="", exit_code=0, timed_out=False),
+        ],
+    )
+    adapter = ZeroClawAdapter(runtime_config, executor)
+    task = Task(
+        id="zeroclaw.regression.openai-relay",
+        category="coding",
+        description="zeroclaw openai relay contract",
+        user_query="Reply with MINIMAX_OK.",
+        workspace_files=[{"path": "README.md", "content": "seed\n"}],
+        timeout_sec=30,
+    )
+    prepared = adapter.prepare(task, "zeroclaw-openai-relay")
+    config_dir = Path(prepared.env["_EVAL_CONFIG_DIR"])
+
+    monkeypatch.setattr(
+        "agent_harness_eval.adapters.zeroclaw._read_zeroclaw_runtime_trace",
+        lambda trace_path: {
+            "trace": [
+                CanonicalTraceEvent(type="message", role="assistant", text="MINIMAX_OK", ts="2026-01-01T00:00:00+00:00")
+            ],
+            "usage": {
+                "input": 7,
+                "output": 3,
+                "cache_read": 0,
+                "cache_write": 0,
+                "total_tokens": 10,
+                "tool_calls": 0,
+                "turns": 1,
+            },
+        },
+    )
+    monkeypatch.setattr(
+        "agent_harness_eval.adapters.zeroclaw._patch_zeroclaw_autonomy_config",
+        lambda config_dir_arg, workspace_dir_arg, **kwargs: (config_dir / "config.toml").write_text(
+            '[security]\nlevel = "full"\n', encoding="utf-8"
+        ),
+    )
+
+    try:
+        result = await adapter.run(prepared, "relay:MiniMax-M2.7")
+
+        assert result.status == "completed"
+        assert len(executor.calls) == 2
+
+        onboard_args = executor.calls[0]["inner_args"]
+        agent_args = executor.calls[1]["inner_args"]
+        assert isinstance(onboard_args, list)
+        assert isinstance(agent_args, list)
+        assert arg_value(onboard_args, "--provider") == "custom:https://relay.example.com/v1"
+        assert arg_value(agent_args, "--provider") == "custom:https://relay.example.com/v1"
+        assert executor.calls[1]["inner_env"]["API_KEY"] == "relay-key"
+        assert 'api_url = "https://relay.example.com/v1"' not in config_dir.joinpath("config.toml").read_text(
+            encoding="utf-8"
+        )
     finally:
         adapter.cleanup(prepared)
 
@@ -290,13 +355,6 @@ async def test_zeroclaw_run_syncs_workspace_back_even_when_agent_fails(
             '[security]\nlevel = "full"\n', encoding="utf-8"
         ),
     )
-    monkeypatch.setattr(
-        "agent_harness_eval.adapters.zeroclaw._inject_zeroclaw_api_key",
-        lambda config_dir_arg, api_key: (config_dir / "config.toml").write_text(
-            f'api_key = "{api_key}"\n', encoding="utf-8"
-        ),
-    )
-
     try:
         result = await adapter.run(prepared, "relay:claude-sonnet-4-6")
 
