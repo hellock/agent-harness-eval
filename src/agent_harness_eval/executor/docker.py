@@ -230,6 +230,7 @@ async def ensure_managed_harness_images(
             raise FileNotFoundError(f"Managed docker build script not found for {harness}: {build_script_path}")
         await _ensure_managed_base_image(project_root)
         build_env = _managed_harness_build_env(harness, runtime_config)
+        print(f"Building Docker image for {harness}: {managed_image}")
         build_result = await run_subprocess(
             "bash",
             [str(build_script_path), _get_harness_version(harness, runtime_config), managed_image],
@@ -241,6 +242,7 @@ async def ensure_managed_harness_images(
         if build_result.exit_code != 0:
             detail = (build_result.stderr or build_result.stdout or "").strip()
             raise RuntimeError(f"Failed to build managed docker image for {harness}: {managed_image}\n{detail[:1000]}")
+        print(f"Built Docker image for {harness}: {managed_image}")
 
 
 async def _ensure_managed_base_image(project_root: Path) -> None:
@@ -258,6 +260,7 @@ async def _ensure_managed_base_image(project_root: Path) -> None:
     if not build_script_path.is_file():
         raise FileNotFoundError(f"Managed docker base build script not found: {build_script_path}")
 
+    print(f"Building shared Docker base image: {_MANAGED_BASE_IMAGE}")
     build_result = await run_subprocess(
         "bash",
         [str(build_script_path), _MANAGED_BASE_IMAGE],
@@ -268,6 +271,7 @@ async def _ensure_managed_base_image(project_root: Path) -> None:
     if build_result.exit_code != 0:
         detail = (build_result.stderr or build_result.stdout or "").strip()
         raise RuntimeError(f"Failed to build managed docker base image: {_MANAGED_BASE_IMAGE}\n{detail[:1000]}")
+    print(f"Built shared Docker base image: {_MANAGED_BASE_IMAGE}")
 
 
 def _get_harness_version(harness: str, runtime_config: RuntimeConfig) -> str:
