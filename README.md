@@ -156,7 +156,7 @@ executor: docker   # force Docker
 
 `executor` must be set explicitly. Use `executor: host` for direct host execution and `executor: docker` for containerized runs.
 
-For repo-managed harness images (`openclaw`, `claude-code`, `codex`, `nanobot`, `hermes`, `zeroclaw`), the first `run` will automatically build the selected image if it is missing. The image tag is derived from the harness version in `eval.yaml`, for example:
+For repo-managed harness images (`openclaw`, `claude-code`, `codex`, `nanobot`, `hermes`, `zeroclaw`), the first `run` will automatically build any missing images. That includes the shared base image plus the selected harness image. The harness image tag is derived from the version in `eval.yaml`, for example:
 
 ```yaml
 harnesses:

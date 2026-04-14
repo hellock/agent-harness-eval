@@ -197,6 +197,9 @@ def selected_image_is_managed(
     return managed is not None and managed == selected_image
 
 
+_MANAGED_BASE_IMAGE = "agent-harness-eval-base:latest"
+
+
 async def ensure_managed_harness_images(
     project_root: Path,
     harnesses: list[str],
@@ -225,6 +228,7 @@ async def ensure_managed_harness_images(
         build_script_path = project_root / "docker" / harness / "build_docker_image.sh"
         if not build_script_path.is_file():
             raise FileNotFoundError(f"Managed docker build script not found for {harness}: {build_script_path}")
+        await _ensure_managed_base_image(project_root)
         build_env = _managed_harness_build_env(harness, runtime_config)
         build_result = await run_subprocess(
             "bash",
@@ -237,6 +241,33 @@ async def ensure_managed_harness_images(
         if build_result.exit_code != 0:
             detail = (build_result.stderr or build_result.stdout or "").strip()
             raise RuntimeError(f"Failed to build managed docker image for {harness}: {managed_image}\n{detail[:1000]}")
+
+
+async def _ensure_managed_base_image(project_root: Path) -> None:
+    inspect_result = await run_subprocess(
+        "docker",
+        ["image", "inspect", _MANAGED_BASE_IMAGE],
+        cwd=str(project_root),
+        timeout_ms=10_000,
+        filtered_env=False,
+    )
+    if inspect_result.exit_code == 0:
+        return
+
+    build_script_path = project_root / "docker" / "base" / "build_docker_image.sh"
+    if not build_script_path.is_file():
+        raise FileNotFoundError(f"Managed docker base build script not found: {build_script_path}")
+
+    build_result = await run_subprocess(
+        "bash",
+        [str(build_script_path), _MANAGED_BASE_IMAGE],
+        cwd=str(project_root),
+        timeout_ms=10 * 60 * 1000,
+        filtered_env=False,
+    )
+    if build_result.exit_code != 0:
+        detail = (build_result.stderr or build_result.stdout or "").strip()
+        raise RuntimeError(f"Failed to build managed docker base image: {_MANAGED_BASE_IMAGE}\n{detail[:1000]}")
 
 
 def _get_harness_version(harness: str, runtime_config: RuntimeConfig) -> str:

@@ -156,7 +156,7 @@ executor: docker   # 强制使用 Docker
 
 `executor` 必须显式指定。直接在本机运行就写 `executor: host`，需要容器隔离就写 `executor: docker`。
 
-对于仓库自带管理镜像的 harness（`openclaw`、`claude-code`、`codex`、`nanobot`、`hermes`、`zeroclaw`），第一次 `run` 时如果镜像不存在，框架会自动按 `eval.yaml` 里的 harness 版本构建镜像。例如：
+对于仓库自带管理镜像的 harness（`openclaw`、`claude-code`、`codex`、`nanobot`、`hermes`、`zeroclaw`），第一次 `run` 时如果缺少镜像，框架会自动构建所需镜像。这包括共享 base image 和所选 harness image。harness image 的 tag 仍按 `eval.yaml` 里的版本推导，例如：
 
 ```yaml
 harnesses:

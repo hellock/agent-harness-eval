@@ -275,6 +275,9 @@ async def test_ensure_managed_harness_images_passes_managed_build_env_to_build_s
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     project_root = isolated_run_dir
+    base_build_script = project_root / "docker" / "base" / "build_docker_image.sh"
+    base_build_script.parent.mkdir(parents=True, exist_ok=True)
+    base_build_script.write_text("#!/usr/bin/env bash\nexit 0\n")
     build_script = project_root / "docker" / "fake-managed" / "build_docker_image.sh"
     build_script.parent.mkdir(parents=True)
     build_script.write_text("#!/usr/bin/env bash\nexit 0\n")
@@ -321,9 +324,15 @@ async def test_ensure_managed_harness_images_passes_managed_build_env_to_build_s
         selected_images={"fake-managed": "agent-harness-eval-fake-managed:0.1.0"},
     )
 
-    assert len(calls) == 2
-    assert calls[1][0] == "bash"
-    assert calls[1][2] == {"EVAL_FAKE_SOURCE_ROOT": "/tmp/fake-src"}
+    assert len(calls) == 4
+    assert calls[0][0] == "docker"
+    assert calls[0][1] == ["image", "inspect", "agent-harness-eval-fake-managed:0.1.0"]
+    assert calls[1][0] == "docker"
+    assert calls[1][1] == ["image", "inspect", "agent-harness-eval-base:latest"]
+    assert calls[2][0] == "bash"
+    assert calls[2][2] is None
+    assert calls[3][0] == "bash"
+    assert calls[3][2] == {"EVAL_FAKE_SOURCE_ROOT": "/tmp/fake-src"}
 
 
 @pytest.mark.asyncio
@@ -332,6 +341,9 @@ async def test_ensure_managed_harness_images_requires_build_env_from_managed_ada
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     project_root = isolated_run_dir
+    base_build_script = project_root / "docker" / "base" / "build_docker_image.sh"
+    base_build_script.parent.mkdir(parents=True, exist_ok=True)
+    base_build_script.write_text("#!/usr/bin/env bash\nexit 0\n")
     build_script = project_root / "docker" / "fake-managed" / "build_docker_image.sh"
     build_script.parent.mkdir(parents=True)
     build_script.write_text("#!/usr/bin/env bash\nexit 0\n")
@@ -359,6 +371,10 @@ async def test_ensure_managed_harness_images_requires_build_env_from_managed_ada
         filtered_env: bool = True,
         inherit_env: bool = True,
     ) -> SubprocessResult:
+        if command == "docker" and args[:2] == ["image", "inspect"]:
+            return SubprocessResult(stdout="", stderr="", exit_code=1, timed_out=False)
+        if command == "bash" and args[:1] == [str(base_build_script)]:
+            return SubprocessResult(stdout="", stderr="", exit_code=0, timed_out=False)
         return SubprocessResult(stdout="", stderr="", exit_code=1, timed_out=False)
 
     monkeypatch.setattr("agent_harness_eval.executor.docker.run_subprocess", fake_run_subprocess)

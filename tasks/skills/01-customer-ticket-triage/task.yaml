@@ -34,7 +34,7 @@ graders:
   - type: trajectory
     rule:
       kind: tool_called
-      tool_pattern: read|Read|read_file|glob|Glob|ls|cat|head|view|Bash|shell|grep|Grep|search_files|mcp_read_file|terminal|execute_code|process|patch
+      tool_pattern: read|Read|read_file|glob|Glob|ls|cat|head|view|Bash|shell|grep|Grep|search_files|mcp_read_file|terminal|execute_code|process|patch|write|Write|write_file|edit|Edit|create|Create
       min: 4
   - type: rubric_judge
     rubric: |

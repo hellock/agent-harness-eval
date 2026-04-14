@@ -172,13 +172,36 @@ class OpenClawAdapter(HarnessAdapter):
         latency_sec = asyncio.get_running_loop().time() - start_time
 
         if result.timed_out:
+            session_data = _read_openclaw_session_with_usage(state_dir, agent_id, session_id)
+            trace = session_data["trace"]
+            final_text = _extract_openclaw_final_text(trace)
+            if not any(event.type in {"task_completed", "task_failed"} for event in trace):
+                trace.append(
+                    CanonicalTraceEvent(
+                        type="task_failed",
+                        error="OpenClaw timed out",
+                        ts=datetime.now(UTC).isoformat(),
+                    )
+                )
+            usage = session_data["usage"]
+            tool_calls = len([e for e in trace if e.type == "tool_call_started"])
+            turns = usage["calls"] or len([e for e in trace if e.type == "message"])
             return self._make_result(
                 task,
                 model,
                 "timed_out",
-                "",
-                [],
-                RunMetrics(latency_sec=task.timeout_sec),
+                final_text,
+                trace,
+                RunMetrics(
+                    latency_sec=task.timeout_sec,
+                    input_tokens=usage["input"],
+                    output_tokens=usage["output"],
+                    cache_read_tokens=usage["cache_read"],
+                    cache_write_tokens=usage["cache_write"],
+                    total_tokens=usage["total_tokens"],
+                    tool_calls=tool_calls,
+                    turns=turns,
+                ),
             )
         subprocess_failure = detect_subprocess_failure(result, command_label="OpenClaw")
         if subprocess_failure:

@@ -195,6 +195,83 @@ async def test_openclaw_run_returns_failed_result_on_nonzero_exit(
 
 
 @pytest.mark.asyncio
+async def test_openclaw_timeout_recovers_partial_session_trace(
+    isolated_run_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_config = RuntimeConfig(
+        project_root=isolated_run_dir,
+        providers={
+            "anthropic": ProviderConfig(
+                base_url="https://api.anthropic.com",
+                api_key="anthropic-key",
+                api_format="anthropic",
+            )
+        },
+        _process_env={"ANTHROPIC_API_KEY": "anthropic-key"},
+    )
+    executor = RecordingExecutor(
+        runtime_config,
+        SubprocessResult(stdout="", stderr="", exit_code=0, timed_out=True),
+    )
+    adapter = OpenClawAdapter(runtime_config, executor)
+    task = Task(
+        id="openclaw.regression.timeout-recovery",
+        category="coding",
+        description="openclaw timeout recovery",
+        user_query="Reply with OPENCLAW_OK.",
+        workspace_files=[{"path": "README.md", "content": "seed\n"}],
+        timeout_sec=30,
+    )
+    prepared = adapter.prepare(task, "openclaw-timeout-recovery")
+
+    monkeypatch.setattr(
+        "agent_harness_eval.adapters.openclaw._read_openclaw_session_with_usage",
+        lambda state_dir, agent_id, session_id: {
+            "trace": [
+                CanonicalTraceEvent(
+                    type="message",
+                    role="assistant",
+                    text="partial answer",
+                    ts="2026-01-01T00:00:00+00:00",
+                ),
+                CanonicalTraceEvent(
+                    type="tool_call_started",
+                    tool_name="read_file",
+                    ts="2026-01-01T00:00:01+00:00",
+                ),
+            ],
+            "usage": {
+                "input": 10,
+                "output": 5,
+                "cache_read": 2,
+                "cache_write": 1,
+                "total_tokens": 18,
+                "calls": 3,
+            },
+        },
+    )
+
+    try:
+        result = await adapter.run(prepared, "anthropic:claude-sonnet-4-6")
+
+        assert result.status == "timed_out"
+        assert result.final_text == "partial answer"
+        assert [event.type for event in result.trace] == ["message", "tool_call_started", "task_failed"]
+        assert result.trace[-1].error == "OpenClaw timed out"
+        assert result.metrics.input_tokens == 10
+        assert result.metrics.output_tokens == 5
+        assert result.metrics.cache_read_tokens == 2
+        assert result.metrics.cache_write_tokens == 1
+        assert result.metrics.total_tokens == 18
+        assert result.metrics.tool_calls == 1
+        assert result.metrics.turns == 3
+        assert result.metrics.latency_sec == 30
+    finally:
+        adapter.cleanup(prepared)
+
+
+@pytest.mark.asyncio
 async def test_openclaw_run_fails_fast_when_provider_is_missing(
     isolated_run_dir: Path,
 ) -> None:
