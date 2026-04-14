@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 import uuid
@@ -206,7 +207,14 @@ async def ensure_managed_harness_images(
     runtime_config: RuntimeConfig,
     selected_images: dict[str, str] | None = None,
 ) -> None:
-    """Build missing managed images for the requested harnesses."""
+    """Build missing managed images for the requested harnesses.
+
+    Image presence checks and missing-image builds both run concurrently across
+    harnesses. The shared base image is built once (sequentially) before any
+    harness builds, because every harness Dockerfile FROM's it.
+    """
+    # Phase A: collect candidates (no I/O)
+    candidates: list[tuple[str, str]] = []  # (harness, managed_image)
     for harness in harnesses:
         managed_image = get_managed_harness_image(harness, runtime_config)
         if managed_image is None:
@@ -214,35 +222,79 @@ async def ensure_managed_harness_images(
         selected_image = (selected_images or {}).get(harness)
         if selected_image != managed_image:
             continue
+        candidates.append((harness, managed_image))
 
-        inspect_result = await run_subprocess(
-            "docker",
-            ["image", "inspect", managed_image],
-            cwd=str(project_root),
-            timeout_ms=10_000,
-            filtered_env=False,
-        )
-        if inspect_result.exit_code == 0:
-            continue
+    if not candidates:
+        return
 
+    # Phase B: check existence in parallel
+    inspect_results = await asyncio.gather(
+        *[
+            run_subprocess(
+                "docker",
+                ["image", "inspect", managed_image],
+                cwd=str(project_root),
+                timeout_ms=10_000,
+                filtered_env=False,
+            )
+            for _, managed_image in candidates
+        ]
+    )
+
+    missing: list[tuple[str, str]] = [
+        (harness, managed_image)
+        for (harness, managed_image), inspect in zip(candidates, inspect_results, strict=True)
+        if inspect.exit_code != 0
+    ]
+    if not missing:
+        return
+
+    # Validate build scripts before touching the base image
+    build_tasks: list[tuple[str, str, Path]] = []
+    for harness, managed_image in missing:
         build_script_path = project_root / "docker" / harness / "build_docker_image.sh"
         if not build_script_path.is_file():
             raise FileNotFoundError(f"Managed docker build script not found for {harness}: {build_script_path}")
-        await _ensure_managed_base_image(project_root)
-        build_env = _managed_harness_build_env(harness, runtime_config)
-        print(f"Building Docker image for {harness}: {managed_image}")
-        build_result = await run_subprocess(
-            "bash",
-            [str(build_script_path), _get_harness_version(harness, runtime_config), managed_image],
-            cwd=str(project_root),
-            env=build_env,
-            timeout_ms=10 * 60 * 1000,
-            filtered_env=False,
-        )
-        if build_result.exit_code != 0:
-            detail = (build_result.stderr or build_result.stdout or "").strip()
-            raise RuntimeError(f"Failed to build managed docker image for {harness}: {managed_image}\n{detail[:1000]}")
-        print(f"Built Docker image for {harness}: {managed_image}")
+        build_tasks.append((harness, managed_image, build_script_path))
+
+    # Phase C: build base once, then all harness images in parallel
+    await _ensure_managed_base_image(project_root)
+    await asyncio.gather(
+        *[
+            _build_managed_harness_image(
+                harness=harness,
+                managed_image=managed_image,
+                build_script_path=build_script_path,
+                project_root=project_root,
+                runtime_config=runtime_config,
+            )
+            for harness, managed_image, build_script_path in build_tasks
+        ]
+    )
+
+
+async def _build_managed_harness_image(
+    *,
+    harness: str,
+    managed_image: str,
+    build_script_path: Path,
+    project_root: Path,
+    runtime_config: RuntimeConfig,
+) -> None:
+    build_env = _managed_harness_build_env(harness, runtime_config)
+    print(f"Building Docker image for {harness}: {managed_image}")
+    build_result = await run_subprocess(
+        "bash",
+        [str(build_script_path), _get_harness_version(harness, runtime_config), managed_image],
+        cwd=str(project_root),
+        env=build_env,
+        timeout_ms=10 * 60 * 1000,
+        filtered_env=False,
+    )
+    if build_result.exit_code != 0:
+        detail = (build_result.stderr or build_result.stdout or "").strip()
+        raise RuntimeError(f"Failed to build managed docker image for {harness}: {managed_image}\n{detail[:1000]}")
+    print(f"Built Docker image for {harness}: {managed_image}")
 
 
 async def _ensure_managed_base_image(project_root: Path) -> None:

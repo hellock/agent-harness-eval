@@ -113,6 +113,8 @@ async def run_harness_preflight(
     # ─── Layer 1: Static checks (config + install) ───
     provider_probe_work: list[_ProviderProbeTarget] = []
 
+    # Phase 1a: sync config checks; collect harnesses eligible for install check.
+    install_candidates: list[tuple[str, HarnessAdapter, list[tuple[ModelSpec, ProviderConfig]]]] = []
     for harness in config.harnesses:
         adapter = adapters.get(harness)
         if not adapter:
@@ -152,8 +154,13 @@ async def run_harness_preflight(
         if not harness_models_ok:
             continue
 
-        # Install check: CLI binary exists and responds to --version.
-        install_result = await adapter.verify_install()
+        install_candidates.append((harness, adapter, harness_models_ok))
+
+    # Phase 1b: install checks in parallel (each is an independent subprocess/docker call).
+    install_results = await asyncio.gather(*[adapter.verify_install() for _, adapter, _ in install_candidates])
+
+    # Phase 1c: dispatch install results, enqueue surviving targets for provider probe.
+    for (harness, adapter, harness_models_ok), install_result in zip(install_candidates, install_results, strict=True):
         if not install_result.ok:
             for model_spec, _provider in harness_models_ok:
                 results.append(
