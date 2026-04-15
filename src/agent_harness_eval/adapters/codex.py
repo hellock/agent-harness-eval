@@ -8,7 +8,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from datetime import UTC, datetime
 from typing import Any, ClassVar
 
 from ..config.providers import parse_model_spec
@@ -18,6 +17,7 @@ from ..task import Task
 from ..types import CanonicalTraceEvent, RunMetrics, RunResult
 from ..utils.conversation import format_task_message
 from ..utils.failure_origin import detect_failure_origin_from_error
+from ..utils.timestamps import task_completion_ts, to_canonical_ts
 from ..utils.workspace import create_run_layout, remove_workspace
 from . import register_adapter
 from .interface import (
@@ -138,7 +138,7 @@ class CodexAdapter(HarnessAdapter):
                     CanonicalTraceEvent(
                         type="task_failed",
                         error=subprocess_failure.error,
-                        ts=datetime.now(UTC).isoformat(),
+                        ts=to_canonical_ts(),
                     )
                 ],
                 RunMetrics(latency_sec=latency_sec),
@@ -155,7 +155,7 @@ class CodexAdapter(HarnessAdapter):
             trace.append(
                 CanonicalTraceEvent(
                     type="task_completed",
-                    ts=datetime.now(UTC).isoformat(),
+                    ts=task_completion_ts(trace),
                 )
             )
 
@@ -184,7 +184,7 @@ class CodexAdapter(HarnessAdapter):
                     CanonicalTraceEvent(
                         type="task_failed",
                         error=error[:800],
-                        ts=datetime.now(UTC).isoformat(),
+                        ts=to_canonical_ts(),
                     )
                 ],
                 RunMetrics(latency_sec=latency_sec),
@@ -217,9 +217,7 @@ def _parse_codex_jsonl(stdout: str) -> dict[str, Any]:
             continue
 
         event_type = event.get("type", "")
-        ts = event.get("ts") or event.get("timestamp") or datetime.now(UTC).isoformat()
-        if isinstance(ts, (int, float)):
-            ts = datetime.fromtimestamp(ts / 1000, tz=UTC).isoformat()
+        ts = to_canonical_ts(event.get("ts") or event.get("timestamp"))
 
         # Extract final text from item.completed events with agent_message items
         if event_type == "item.completed":

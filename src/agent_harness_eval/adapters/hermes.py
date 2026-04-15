@@ -12,7 +12,6 @@ import json
 import os
 import re
 import sqlite3
-from datetime import UTC, datetime
 from typing import Any, ClassVar
 
 from ..config.providers import parse_model_spec
@@ -23,6 +22,7 @@ from ..types import CanonicalTraceEvent, RunMetrics, RunResult
 from ..utils.conversation import format_task_message
 from ..utils.cost import calculate_cost
 from ..utils.failure_origin import detect_failure_origin_from_error
+from ..utils.timestamps import task_completion_ts, to_canonical_ts
 from ..utils.workspace import create_run_layout, remove_workspace
 from . import register_adapter
 from .interface import (
@@ -143,13 +143,13 @@ class HermesAdapter(HarnessAdapter):
                         type="message",
                         role="assistant",
                         text=final_text,
-                        ts=datetime.now(UTC).isoformat(),
+                        ts=to_canonical_ts(),
                     )
                 )
             trace.append(
                 CanonicalTraceEvent(
                     type="task_completed",
-                    ts=datetime.now(UTC).isoformat(),
+                    ts=task_completion_ts(trace),
                 )
             )
 
@@ -195,7 +195,7 @@ class HermesAdapter(HarnessAdapter):
                     CanonicalTraceEvent(
                         type="task_failed",
                         error=error[:800],
-                        ts=datetime.now(UTC).isoformat(),
+                        ts=to_canonical_ts(),
                     )
                 ],
                 RunMetrics(latency_sec=latency_sec),
@@ -335,11 +335,7 @@ def _read_hermes_session(
             role = msg.get("role", "")
             content = msg.get("content") or ""
             ts_epoch = msg.get("timestamp")
-            ts = (
-                datetime.fromtimestamp(ts_epoch, tz=UTC).isoformat()
-                if isinstance(ts_epoch, (int, float)) and ts_epoch > 0
-                else datetime.now(UTC).isoformat()
-            )
+            ts = to_canonical_ts(ts_epoch if isinstance(ts_epoch, (int, float)) and ts_epoch > 0 else None)
 
             # Parse tool_calls JSON if present
             raw_tool_calls = msg.get("tool_calls")
@@ -434,7 +430,7 @@ def _read_hermes_session(
                     tool_name=tool_name,
                     success=False,
                     output="<no result recorded>",
-                    ts=datetime.now(UTC).isoformat(),
+                    ts=to_canonical_ts(),
                 )
             )
     finally:
