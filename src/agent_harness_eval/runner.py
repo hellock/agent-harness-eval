@@ -9,7 +9,6 @@ import shutil
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
 from typing import Any, TypeVar
 
 from .adapters.interface import HarnessAdapter, PreparedRun
@@ -36,6 +35,7 @@ from .types import (
 from .utils.conversation import format_task_message
 from .utils.cost import ModelPricing, calculate_cost_no_cache
 from .utils.failure_origin import detect_failure_origin_from_error
+from .utils.timestamps import to_canonical_ts
 
 T = TypeVar("T")
 R = TypeVar("R")
@@ -221,7 +221,7 @@ def _failed_run_result(
             CanonicalTraceEvent(
                 type="task_failed",
                 error=error_text,
-                ts=datetime.now(UTC).isoformat(),
+                ts=to_canonical_ts(),
             )
         ],
         metrics=RunMetrics(),
@@ -454,7 +454,7 @@ async def _execute_single_run(
                     CanonicalTraceEvent(
                         type="task_failed",
                         error=f"harness {harness} unsupported: {'; '.join(skip_reasons)}",
-                        ts=datetime.now(UTC).isoformat(),
+                        ts=to_canonical_ts(),
                     )
                 ],
                 metrics=RunMetrics(),

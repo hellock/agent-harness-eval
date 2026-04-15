@@ -21,6 +21,13 @@ TraceEventType = Literal[
 @dataclass
 class CanonicalTraceEvent:
     type: TraceEventType
+    # ts contract: RFC 3339 / ISO 8601 string, UTC (``+00:00`` offset),
+    # millisecond precision (3 fractional-second digits), produced by
+    # ``utils.timestamps.to_canonical_ts``. Adapters MUST funnel any harness-
+    # native timestamp (epoch numbers, Z-suffixed strings, naive datetimes,
+    # ns-precision strings) through that helper rather than emitting raw
+    # values, so the persisted trace is comparable across harnesses and
+    # round-trippable through ``datetime.fromisoformat``.
     ts: str
     role: Literal["user", "assistant"] | None = None
     text: str | None = None

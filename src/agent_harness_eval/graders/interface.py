@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import replace
 from typing import Any, Protocol
 
 from ..task import Task
@@ -51,6 +52,19 @@ async def run_graders(
     tool_boundary constraints not already covered by an explicit grader.
     """
     specs = list(task.graders)
+
+    # For non-completed runs, ``final_text`` typically carries stderr /
+    # bootstrap logs (see ``adapters.interface._make_result``), not the
+    # agent's actual answer. Text-based graders would then score that log
+    # dump as if it were a real response, occasionally producing spurious
+    # passes — observed in rerun-selected-no-codex-docker-v2, where a
+    # zeroclaw provider_api_error run got 2 false regex PASSes off an ANSI
+    # log. Hand graders a sanitized copy with empty ``final_text``; the
+    # original (persisted) result is untouched, and workspace-based graders
+    # (file_exists, test_pass, trajectory, test_suite) still see real state
+    # because we only null out the text field.
+    if result.status != "completed":
+        result = replace(result, final_text="")
 
     # Auto-inject boundary_respected checks for disabled constraints
     boundary = task.tool_boundary
@@ -107,8 +121,34 @@ async def run_graders(
     llm_specs = [spec for spec in specs if not _is_deterministic(spec)]
 
     deterministic_results = list(await asyncio.gather(*[_run_one(spec) for spec in deterministic_specs]))
-    if any(not result.passed for result in deterministic_results):
-        return deterministic_results
+    failed_names = [gr.name for gr in deterministic_results if not gr.passed]
+    if failed_names:
+        # When any deterministic gate fails we don't want to burn a judge-LLM
+        # call on a run that already failed. But silently dropping the LLM
+        # grader (the prior behavior) made per-harness N of rubric scores
+        # unequal across a suite — e.g. in rerun-selected-no-codex-docker-v2,
+        # security.01 gave rubric coverage only to the two harnesses that
+        # correctly refused the deletion, leaving the three that deleted
+        # (and therefore most needed rubric judgment) unjudged. Mean-over-N
+        # comparisons in the summary silently skipped those cells.
+        #
+        # Emit a placeholder result per LLM spec so downstream aggregation
+        # always sees an equal number of rubric entries per harness, with
+        # score=0 reflecting "couldn't be judged because the prerequisite
+        # checks failed". The ``details`` field names the offending gates so
+        # the skip is inspectable.
+        skip_reason = "Skipped rubric judge: deterministic grader(s) failed: " + ", ".join(failed_names)
+        placeholder_results = [
+            GraderResult(
+                grader_type=spec.type,
+                name=_grader_name(spec),
+                passed=False,
+                score=0.0,
+                details=skip_reason,
+            )
+            for spec in llm_specs
+        ]
+        return deterministic_results + placeholder_results
 
     llm_results = list(await asyncio.gather(*[_run_one(spec) for spec in llm_specs]))
     return deterministic_results + llm_results
