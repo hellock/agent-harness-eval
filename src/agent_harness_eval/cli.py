@@ -73,7 +73,12 @@ def _create_parser() -> argparse.ArgumentParser:
         type=str,
         help="Model spec(s), comma-separated (provider:model shorthand)",
     )
-    run_parser.add_argument("--harness", type=str, help="Comma-separated harnesses")
+    run_parser.add_argument(
+        "--harness",
+        type=str,
+        action="append",
+        help="Harnesses to run. Repeat the flag or pass a comma-separated list.",
+    )
     run_parser.add_argument("--runs", type=int, help="Runs per task")
     run_parser.add_argument("--concurrency", type=int, help="Max concurrent tasks")
     run_parser.add_argument(
@@ -85,10 +90,22 @@ def _create_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--judge-model", type=str, help="Model for judge graders (provider:model)")
     run_parser.add_argument("--tasks-dir", type=str, help="Tasks directory")
     run_parser.add_argument("--category", type=str, help="Filter by category")
-    run_parser.add_argument("--task", "--task-id", type=str, help="Filter by task ID(s), comma-separated")
+    run_parser.add_argument(
+        "--task",
+        "--task-id",
+        type=str,
+        action="append",
+        help="Task IDs to run. Repeat the flag or pass a comma-separated list.",
+    )
     run_parser.add_argument("--output", type=str, help="Output directory")
     run_parser.add_argument("--timeout", type=int, help="Per-task timeout in seconds")
     run_parser.add_argument("--reinstall", action="store_true", help="Reinstall harnesses")
+    run_parser.add_argument(
+        "--skip-preflight",
+        action="store_true",
+        help="Skip preflight probes (install / provider / harness). Use when you "
+        "know the environment is good and want to save the LLM round-trip cost.",
+    )
 
     # Report command
     report_parser = subparsers.add_parser("report", help="Generate reports from results")
@@ -183,6 +200,7 @@ async def _run_command(
         rc,
         run_harness_preflight,
         write_preflight_artifacts,
+        skip_preflight=args.skip_preflight,
     )
 
     # Create judge LLM
@@ -239,16 +257,23 @@ def _build_run_eval_config(
 
     configured_harnesses = eval_yaml.get("harnesses") or {}
     if args.harness:
-        harness_str = args.harness
+        requested_harnesses = []
+        for harness_arg in args.harness:
+            requested_harnesses.extend(s.strip() for s in harness_arg.split(",") if s.strip())
     else:
         default_harness_list = ",".join("claude-code" if key == "claude_code" else key for key in configured_harnesses)
         if not default_harness_list:
             raise ValueError('No harnesses configured. Set "harnesses" in eval.yaml or pass --harness.')
-        harness_str = default_harness_list
-    requested_harnesses: list[str] = [s.strip() for s in harness_str.split(",")]
+        requested_harnesses = [s.strip() for s in default_harness_list.split(",") if s.strip()]
 
     runs_bust_cache_raw = eval_yaml.get("runs_bust_cache")
     runs_bust_cache = bool(runs_bust_cache_raw) if runs_bust_cache_raw is not None else True
+
+    requested_task_ids = None
+    if args.task:
+        requested_task_ids = []
+        for task_arg in args.task:
+            requested_task_ids.extend(s.strip() for s in task_arg.split(",") if s.strip())
 
     return EvalConfig(
         model_spec=model_specs[0],
@@ -261,7 +286,7 @@ def _build_run_eval_config(
         providers=rc.providers,
         task_filter={
             "categories": [s.strip() for s in args.category.split(",")] if args.category else None,
-            "ids": [s.strip() for s in args.task.split(",")] if args.task else None,
+            "ids": requested_task_ids,
         },
         output_dir="",
         timeout_sec=args.timeout or int(eval_yaml["timeout"]),
@@ -331,8 +356,14 @@ async def _run_preflight_phase(
     rc: RuntimeConfig,
     run_harness_preflight: Any,
     write_preflight_artifacts: Any,
+    *,
+    skip_preflight: bool = False,
 ) -> tuple[list[str], dict[str, Any]]:
     print("\n=== Harness Preflight ===")
+    if skip_preflight:
+        print("  [SKIPPED] --skip-preflight is set; treating all configured harnesses as healthy.")
+        return list(config.harnesses), dict(adapters)
+
     preflight = await run_harness_preflight(config, adapters, rc)
     write_preflight_artifacts(config.output_dir, preflight["results"])
 

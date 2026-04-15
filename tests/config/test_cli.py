@@ -62,13 +62,13 @@ def test_build_run_eval_config_cli_overrides_yaml_defaults() -> None:
     }
     args = _make_args(
         model="openai:gpt-5.4,anthropic:claude-sonnet-4-6",
-        harness="codex,openclaw",
+        harness=["codex,openclaw"],
         runs=3,
         concurrency=5,
         judge_model="openai:gpt-5.4-mini",
         secondary_judge_model="anthropic:claude-sonnet-4-6",
         category="coding,security",
-        task="coding.01,security.02",
+        task=["coding.01,security.02"],
         timeout=900,
     )
 
@@ -90,6 +90,55 @@ def test_build_run_eval_config_cli_overrides_yaml_defaults() -> None:
     }
     assert config.timeout_sec == 900
     assert config.providers == rc.providers
+
+
+def test_build_run_eval_config_accumulates_repeated_harness_flags() -> None:
+    rc = RuntimeConfig(project_root=Path("/tmp/project"))
+    eval_yaml = {
+        "provider": "anthropic",
+        "model": "claude-sonnet-4-6",
+        "judge_model": {"provider": "anthropic", "model": "claude-sonnet-4-6"},
+        "harnesses": {
+            "claude_code": {"version": "2.1.92"},
+        },
+        "runs": 1,
+        "concurrency": 2,
+        "timeout": 600,
+    }
+
+    config = _build_run_eval_config(
+        _make_args(harness=["claude-code", "nanobot,openclaw", "zeroclaw"]),
+        eval_yaml,
+        rc,
+    )
+
+    assert config.harnesses == ["claude-code", "nanobot", "openclaw", "zeroclaw"]
+
+
+def test_build_run_eval_config_accumulates_repeated_task_flags() -> None:
+    rc = RuntimeConfig(project_root=Path("/tmp/project"))
+    eval_yaml = {
+        "provider": "anthropic",
+        "model": "claude-sonnet-4-6",
+        "judge_model": {"provider": "anthropic", "model": "claude-sonnet-4-6"},
+        "harnesses": {
+            "claude_code": {"version": "2.1.92"},
+        },
+        "runs": 1,
+        "concurrency": 2,
+        "timeout": 600,
+    }
+
+    config = _build_run_eval_config(
+        _make_args(task=["coding.01", "security.01,skills.03"]),
+        eval_yaml,
+        rc,
+    )
+
+    assert config.task_filter == {
+        "categories": None,
+        "ids": ["coding.01", "security.01", "skills.03"],
+    }
 
 
 def test_build_run_eval_config_uses_yaml_matrix_and_default_harness_names() -> None:
