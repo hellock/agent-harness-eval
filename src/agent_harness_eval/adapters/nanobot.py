@@ -12,18 +12,18 @@ import re
 import subprocess
 import textwrap
 import uuid
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, ClassVar
 
 from ..config.providers import parse_model_spec
-from ..constants import STDERR_PREVIEW_MAX_CHARS, TOOL_OUTPUT_MAX_CHARS
+from ..constants import ERROR_DETAIL_MAX_CHARS, STDERR_PREVIEW_MAX_CHARS, TOOL_OUTPUT_MAX_CHARS
 from ..executor import attach_run_layout_mounts, filter_env, policy_from_task, resolve_executor_backend
 from ..task import Task
 from ..types import CanonicalTraceEvent, RunMetrics, RunResult
 from ..utils.conversation import format_task_message
 from ..utils.cost import calculate_cost
 from ..utils.failure_origin import detect_failure_origin_from_error
+from ..utils.timestamps import task_completion_ts, to_canonical_ts
 from ..utils.workspace import create_run_layout, remove_workspace
 from . import register_adapter
 from .interface import (
@@ -330,14 +330,61 @@ class NanobotAdapter(HarnessAdapter):
         latency_sec = asyncio.get_running_loop().time() - start_time
 
         if result.timed_out:
-            return self._make_result(
+            final_text = _strip_ansi(result.stdout).strip()
+            trace: list[CanonicalTraceEvent] = []
+            usage = {
+                "input": 0,
+                "output": 0,
+                "cache_read": 0,
+                "cache_write": 0,
+                "total_tokens": 0,
+                "tool_calls": 0,
+                "turns": 0,
+            }
+            # Narrow exception list: we know the realistic failure modes for
+            # reading a JSONL file (missing/unreadable file, malformed line).
+            # Anything outside this set is a bug we want surfaced, not swallowed.
+            recovery_error: str | None = None
+            try:
+                session_data = _read_nanobot_session(runtime_dir, session_id)
+                trace = session_data["trace"]
+                usage = session_data["usage"]
+                if not final_text:
+                    final_text = _extract_nanobot_final_text(trace)
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
+                recovery_error = f"session.jsonl recovery failed ({type(exc).__name__}): {exc}"
+
+            timeout_result = self._make_result(
                 task,
                 model,
                 "timed_out",
-                "",
-                [],
-                RunMetrics(latency_sec=task.timeout_sec),
+                final_text,
+                trace,
+                RunMetrics(
+                    latency_sec=task.timeout_sec,
+                    input_tokens=usage["input"],
+                    output_tokens=usage["output"],
+                    cache_read_tokens=usage["cache_read"],
+                    cache_write_tokens=usage["cache_write"],
+                    total_tokens=usage["total_tokens"],
+                    cost_usd=calculate_cost(
+                        model,
+                        usage["input"],
+                        usage["output"],
+                        usage["cache_read"],
+                        usage["cache_write"],
+                        pricing=self.pricing_override(),
+                    ),
+                    tool_calls=usage["tool_calls"],
+                    turns=usage["turns"],
+                ),
             )
+            # Preserve distinguishing info when session-recovery itself failed,
+            # so "timeout with no recoverable state" and "timeout + session
+            # unreadable" don't look identical in reports.
+            if recovery_error is not None:
+                timeout_result.infra_error_details = recovery_error[:ERROR_DETAIL_MAX_CHARS]
+            return timeout_result
 
         subprocess_failure = detect_subprocess_failure(result, command_label="Nanobot")
         if subprocess_failure:
@@ -350,7 +397,7 @@ class NanobotAdapter(HarnessAdapter):
                     CanonicalTraceEvent(
                         type="task_failed",
                         error=subprocess_failure.error,
-                        ts=datetime.now(UTC).isoformat(),
+                        ts=to_canonical_ts(),
                     )
                 ],
                 RunMetrics(latency_sec=latency_sec),
@@ -371,13 +418,13 @@ class NanobotAdapter(HarnessAdapter):
                         type="message",
                         role="assistant",
                         text=final_text,
-                        ts=datetime.now(UTC).isoformat(),
+                        ts=to_canonical_ts(),
                     )
                 )
             trace.append(
                 CanonicalTraceEvent(
                     type="task_completed",
-                    ts=datetime.now(UTC).isoformat(),
+                    ts=task_completion_ts(trace),
                 )
             )
             usage = session_data["usage"]
@@ -424,7 +471,7 @@ class NanobotAdapter(HarnessAdapter):
                     CanonicalTraceEvent(
                         type="task_failed",
                         error=error[:800],
-                        ts=datetime.now(UTC).isoformat(),
+                        ts=to_canonical_ts(),
                     )
                 ],
                 RunMetrics(latency_sec=latency_sec),
@@ -588,6 +635,20 @@ def _write_nanobot_eval_wrapper(runtime_dir: str) -> str:
     return str(wrapper_path)
 
 
+def _normalize_session_ts(raw: Any) -> str:
+    """Normalize a nanobot session.jsonl ``timestamp`` to a canonical UTC ISO string.
+
+    Nanobot's session log writes naive datetime strings (e.g.
+    ``2026-04-15T07:21:59.336779`` with no offset). Passing those through
+    verbatim leaks naive datetimes into the canonical trace, so downstream
+    ``fromisoformat`` + UTC arithmetic crashes with "can't subtract
+    offset-naive and offset-aware datetimes". Delegate to the shared
+    canonical-ts helper, which assumes UTC for naive input and emits the
+    canonical millisecond-precision form.
+    """
+    return to_canonical_ts(raw)
+
+
 def _read_nanobot_session(runtime_dir: str, session_id: str) -> dict[str, Any]:
     session_path = Path(runtime_dir) / "sessions" / f"{session_id}.jsonl"
     trace: list[CanonicalTraceEvent] = []
@@ -624,9 +685,7 @@ def _read_nanobot_session(runtime_dir: str, session_id: str) -> dict[str, Any]:
             content = event.get("content", "")
             if not isinstance(content, str):
                 content = ""
-            ts = event.get("timestamp")
-            if not isinstance(ts, str) or not ts:
-                ts = datetime.now(UTC).isoformat()
+            ts = _normalize_session_ts(event.get("timestamp"))
 
             if role == "user":
                 trace.append(
@@ -707,11 +766,18 @@ def _read_nanobot_session(runtime_dir: str, session_id: str) -> dict[str, Any]:
                 tool_name=tool_name,
                 success=False,
                 output="<no result recorded>",
-                ts=datetime.now(UTC).isoformat(),
+                ts=to_canonical_ts(),
             )
         )
 
     return {"trace": trace, "usage": usage}
+
+
+def _extract_nanobot_final_text(trace: list[CanonicalTraceEvent]) -> str:
+    for event in reversed(trace):
+        if event.type == "message" and event.role == "assistant" and event.text:
+            return event.text
+    return ""
 
 
 def _prime_nanobot_workspace(workspace_dir: Path) -> None:

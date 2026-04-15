@@ -10,7 +10,6 @@ import json
 import os
 import re
 import uuid
-from datetime import UTC, datetime
 from typing import Any, ClassVar
 
 from ..config.providers import ProviderConfig, parse_model_spec
@@ -22,6 +21,7 @@ from ..utils.conversation import format_task_message
 from ..utils.cost import calculate_cost
 from ..utils.failure_origin import detect_failure_origin_from_error
 from ..utils.subprocess import SubprocessResult
+from ..utils.timestamps import task_completion_ts, to_canonical_ts
 from ..utils.workspace import create_run_layout, remove_workspace
 from . import register_adapter
 from .interface import (
@@ -197,7 +197,7 @@ class OpenClawAdapter(HarnessAdapter):
                     CanonicalTraceEvent(
                         type="task_failed",
                         error="OpenClaw timed out",
-                        ts=datetime.now(UTC).isoformat(),
+                        ts=to_canonical_ts(),
                     )
                 )
             usage = session_data["usage"]
@@ -231,7 +231,7 @@ class OpenClawAdapter(HarnessAdapter):
                     CanonicalTraceEvent(
                         type="task_failed",
                         error=subprocess_failure.error,
-                        ts=datetime.now(UTC).isoformat(),
+                        ts=to_canonical_ts(),
                     )
                 ],
                 RunMetrics(latency_sec=latency_sec),
@@ -247,7 +247,7 @@ class OpenClawAdapter(HarnessAdapter):
                 session_trace.append(
                     CanonicalTraceEvent(
                         type="task_completed",
-                        ts=datetime.now(UTC).isoformat(),
+                        ts=task_completion_ts(session_trace),
                     )
                 )
             usage = session_data["usage"]
@@ -330,13 +330,13 @@ class OpenClawAdapter(HarnessAdapter):
                         type="message",
                         role="assistant",
                         text=final_text,
-                        ts=datetime.now(UTC).isoformat(),
+                        ts=to_canonical_ts(),
                     )
                 )
             trace.append(
                 CanonicalTraceEvent(
                     type="task_completed",
-                    ts=datetime.now(UTC).isoformat(),
+                    ts=task_completion_ts(trace),
                 )
             )
 
@@ -356,6 +356,39 @@ class OpenClawAdapter(HarnessAdapter):
             trace_tool_calls = len([e for e in trace if e.type == "tool_call_started"])
             tool_calls = trace_tool_calls if trace_tool_calls > 0 else estimated_tool_calls
             turns = usage["calls"] if usage["calls"] > 0 else estimated_turns
+
+            # Guard against silent failures: subprocess exits 0 but produces nothing.
+            # Seen when stdout JSON is structurally valid but ``payloads=[]`` AND the
+            # session log was never written (no sessionId in agentMeta). In that
+            # scenario ``final_text`` is empty, ``trace`` holds only the synthetic
+            # ``task_completed`` event we just appended, and all token/tool metrics
+            # are zero. Classifying this as "completed" pollutes pass-rate stats —
+            # the run really failed; grader results just happen to also be zero.
+            has_content = any(event.type in ("message", "tool_call_started") for event in trace)
+            if not final_text and not has_content:
+                error = (
+                    "OpenClaw produced no output: subprocess exited cleanly but "
+                    "stdout payloads were empty and no session log was written"
+                )
+                stderr_tail = (result.stderr or "")[:STDERR_PREVIEW_MAX_CHARS]
+                if stderr_tail:
+                    error += f"\nstderr: {stderr_tail}"
+                return self._make_result(
+                    task,
+                    model,
+                    "failed",
+                    result.stdout or "",
+                    [
+                        CanonicalTraceEvent(
+                            type="task_failed",
+                            error=error[:800],
+                            ts=to_canonical_ts(),
+                        )
+                    ],
+                    RunMetrics(latency_sec=latency_sec),
+                    failure_origin="adapter",
+                    infra_error_code="adapter_empty_output",
+                )
 
             return self._make_result(
                 task,
@@ -399,7 +432,7 @@ class OpenClawAdapter(HarnessAdapter):
                     CanonicalTraceEvent(
                         type="task_failed",
                         error=error[:800],
-                        ts=datetime.now(UTC).isoformat(),
+                        ts=to_canonical_ts(),
                     )
                 ],
                 RunMetrics(latency_sec=latency_sec),
@@ -870,11 +903,7 @@ def _read_openclaw_session_with_usage(state_dir: str, agent_id: str, session_id:
 
             msg = event["message"]
             role = msg.get("role", "")
-            ts = (
-                datetime.fromtimestamp(event["timestamp"] / 1000, tz=UTC).isoformat()
-                if isinstance(event.get("timestamp"), (int, float))
-                else datetime.now(UTC).isoformat()
-            )
+            ts = to_canonical_ts(event.get("timestamp"))
             content_blocks = msg.get("content")
 
             if role == "assistant" and msg.get("usage"):

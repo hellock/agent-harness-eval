@@ -322,6 +322,96 @@ async def test_openclaw_timeout_recovers_partial_session_trace(
 
 
 @pytest.mark.asyncio
+async def test_openclaw_run_classifies_empty_subprocess_output_as_failed(
+    isolated_run_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: a clean-exit subprocess that produces no content must not be
+    labeled "completed".
+
+    Observed in v1 rerun on skills.02: subprocess ran 79s, exited 0, stdout had
+    structurally-valid JSON but ``payloads=[]`` and no ``sessionId`` in
+    ``agentMeta`` → the previous code path returned ``status="completed"`` with
+    empty ``final_text`` and all-zero metrics. Downstream graders saw "completed
+    with 0/9 passed" which is indistinguishable from a real bad-answer failure.
+    The fix reclassifies as ``failed`` with ``infra_error_code="adapter_empty_output"``
+    so the silent crash is visible in reports.
+    """
+    runtime_config = RuntimeConfig(
+        project_root=isolated_run_dir,
+        providers={
+            "anthropic": ProviderConfig(
+                base_url="https://api.anthropic.com",
+                api_key="anthropic-key",
+                api_format="anthropic",
+            )
+        },
+        _process_env={"ANTHROPIC_API_KEY": "anthropic-key"},
+    )
+    executor = RecordingExecutor(
+        runtime_config,
+        SubprocessResult(stdout="", stderr="", exit_code=0, timed_out=False),
+    )
+    adapter = OpenClawAdapter(runtime_config, executor)
+    task = Task(
+        id="openclaw.regression.empty-output",
+        category="skills",
+        description="openclaw silent failure",
+        user_query="Reply with OPENCLAW_OK.",
+        workspace_files=[{"path": "README.md", "content": "seed\n"}],
+        timeout_sec=30,
+    )
+    prepared = adapter.prepare(task, "openclaw-empty-output")
+
+    async def fake_run_until_json(*args, **kwargs):
+        # Valid JSON, but payloads=[] and no sessionId → every content-producing
+        # codepath yields nothing, which is the silent-failure signature.
+        return {
+            "stdout": '{"payloads": [], "meta": {"agentMeta": {}}}',
+            "stderr": "agent exited before first turn",
+            "exit_code": 0,
+            "timed_out": False,
+            "session_completed": False,
+        }
+
+    monkeypatch.setattr(
+        "agent_harness_eval.adapters.openclaw._run_openclaw_subprocess_until_json",
+        fake_run_until_json,
+    )
+    # No session log should be consulted since agentMeta has no sessionId, but
+    # stub it anyway so an accidental call returns an empty result rather than
+    # hitting disk.
+    monkeypatch.setattr(
+        "agent_harness_eval.adapters.openclaw._read_openclaw_session_with_usage",
+        lambda state_dir, agent_id, session_id: {
+            "trace": [],
+            "usage": {
+                "input": 0,
+                "output": 0,
+                "cache_read": 0,
+                "cache_write": 0,
+                "total_tokens": 0,
+                "calls": 0,
+            },
+        },
+    )
+
+    try:
+        result = await adapter.run(prepared, "anthropic:claude-sonnet-4-6")
+
+        assert result.status == "failed"
+        assert result.failure_origin == "adapter"
+        assert result.infra_error_code == "adapter_empty_output"
+        assert result.final_text != ""  # final_text holds the raw stdout for post-mortem
+        assert result.trace and result.trace[0].type == "task_failed"
+        assert "produced no output" in (result.trace[0].error or "")
+        # stderr tail must be preserved so operators can see what the subprocess said
+        assert "agent exited before first turn" in (result.trace[0].error or "")
+    finally:
+        adapter.cleanup(prepared)
+
+
+@pytest.mark.asyncio
 async def test_openclaw_run_fails_fast_when_provider_is_missing(
     isolated_run_dir: Path,
 ) -> None:

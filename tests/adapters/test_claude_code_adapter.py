@@ -164,6 +164,11 @@ async def test_claude_code_run_fails_fast_on_api_format_mismatch(
 
 
 def test_parse_stream_json_and_events_to_trace_pair_tool_results() -> None:
+    """The ``result`` event must NOT emit a message — its text is the same as
+    the preceding ``assistant`` text block (claude-code's stream duplicates
+    the final answer across both event types). The dedicated extractor
+    ``_extract_final_text`` still reads the ``result`` event for the answer.
+    """
     events = _parse_stream_json(
         "\n".join(
             [
@@ -175,10 +180,42 @@ def test_parse_stream_json_and_events_to_trace_pair_tool_results() -> None:
     )
     trace = _events_to_trace(events)
 
-    assert [event.type for event in trace] == ["tool_call_started", "tool_call_completed", "message"]
+    # result event must not emit a message (v2 regression fix): previously
+    # the trace ended with a duplicate assistant message 1ms apart from the
+    # preceding assistant text block.
+    assert [event.type for event in trace] == ["tool_call_started", "tool_call_completed"]
     assert trace[1].success is True
     assert trace[1].output == "file contents"
+    # Final-text extraction still pulls from the result event.
     assert _extract_final_text(events) == "Final answer"
+
+
+def test_events_to_trace_does_not_duplicate_final_assistant_text() -> None:
+    """Regression: v2 showed 4/4 claude-code completed runs with two adjacent
+    identical assistant messages 1ms apart — assistant.text block + result
+    event carrying the same text. After the fix, only the text block emits a
+    trace message; the result event is consumed by ``_extract_final_text``.
+    """
+    events = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-04-15T10:00:00.000+00:00",
+            "message": {"content": [{"type": "text", "text": "the final answer"}]},
+        },
+        {
+            "type": "result",
+            "timestamp": "2026-04-15T10:00:00.010+00:00",
+            "result": "the final answer",
+        },
+    ]
+    trace = _events_to_trace(events)
+
+    # Exactly one message — the assistant text block. No dup from result.
+    assistant_msgs = [e for e in trace if e.type == "message" and e.role == "assistant"]
+    assert len(assistant_msgs) == 1
+    assert assistant_msgs[0].text == "the final answer"
+    # But the extractor still recovers the final answer.
+    assert _extract_final_text(events) == "the final answer"
 
 
 def test_events_to_trace_marks_orphaned_tool_as_failed() -> None:
@@ -196,3 +233,69 @@ def test_events_to_trace_marks_orphaned_tool_as_failed() -> None:
     assert [event.type for event in trace] == ["tool_call_started", "tool_call_completed"]
     assert trace[1].success is False
     assert trace[1].output == "<no result recorded>"
+
+
+def test_events_to_trace_normalizes_out_of_order_timestamps() -> None:
+    trace = _events_to_trace(
+        [
+            {
+                "type": "assistant",
+                "timestamp": "2026-04-15T07:31:38+00:00",
+                "message": {
+                    "content": [{"type": "tool_use", "name": "bash", "input": {"command": "ls"}, "id": "tool-1"}]
+                },
+            },
+            {
+                "type": "user",
+                "timestamp": "2026-04-15T07:30:28+00:00",
+                "message": {"content": [{"type": "tool_result", "content": "ok", "tool_use_id": "tool-1"}]},
+            },
+        ]
+    )
+
+    assert [event.type for event in trace] == ["tool_call_started", "tool_call_completed"]
+    assert trace[0].ts is not None
+    assert trace[1].ts is not None
+    assert trace[0].ts < trace[1].ts
+
+
+def test_events_to_trace_preserves_real_timestamps_when_forward() -> None:
+    """Real timestamps that are naturally forward-moving must survive unchanged.
+
+    Previously the no-ts fallback was ``datetime.now(UTC)`` at parse time, which
+    set a baseline far in the future and caused all subsequent real ts to fail
+    the monotonic check and get bumped to synthetic epsilon-deltas. After the
+    fix, the no-ts fallback inherits ``last_ts``, leaving real ts intact when
+    they are already moving forward.
+    """
+    trace = _events_to_trace(
+        [
+            {
+                "type": "user",
+                "timestamp": "2026-04-15T07:30:28.500+00:00",
+                "message": {"content": [{"type": "tool_result", "content": "seed", "tool_use_id": "seed"}]},
+            },
+            {
+                # no timestamp — must inherit from previous event, not jump to now()
+                "type": "assistant",
+                "message": {
+                    "content": [{"type": "tool_use", "name": "bash", "input": {"command": "ls"}, "id": "tool-2"}]
+                },
+            },
+            {
+                "type": "user",
+                "timestamp": "2026-04-15T07:30:35.000+00:00",
+                "message": {"content": [{"type": "tool_result", "content": "ok", "tool_use_id": "tool-2"}]},
+            },
+        ]
+    )
+
+    # Real ms-aligned timestamps on user events survive at canonical
+    # granularity (ms precision is the contract — see utils/timestamps.py).
+    assert trace[0].ts == "2026-04-15T07:30:28.500+00:00"
+    assert trace[2].ts == "2026-04-15T07:30:35.000+00:00"
+    # The middle assistant event inherits last_ts and gets bumped by the
+    # canonical monotonicity floor (1 ms), so it stays anchored near its
+    # neighbors instead of drifting to parse-time ``now()``.
+    assert trace[0].ts < trace[1].ts < trace[2].ts
+    assert trace[1].ts == "2026-04-15T07:30:28.501+00:00"

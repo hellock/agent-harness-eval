@@ -11,6 +11,7 @@ from agent_harness_eval.adapters.interface import PreparedRun
 from agent_harness_eval.adapters.nanobot import (
     NanobotAdapter,
     _build_nanobot_runtime_config,
+    _normalize_session_ts,
     _prime_nanobot_workspace,
     _read_nanobot_session,
     _write_nanobot_eval_wrapper,
@@ -447,5 +448,203 @@ async def test_nanobot_run_returns_failed_result_when_session_parse_fails(
         assert result.infra_error_code == "adapter_output_error"
         assert result.trace and result.trace[0].type == "task_failed"
         assert "Nanobot output parse error" in (result.trace[0].error or "")
+    finally:
+        adapter.cleanup(prepared)
+
+
+def test_normalize_session_ts_forces_utc_on_naive_input() -> None:
+    """Nanobot's session.jsonl stores naive datetimes; they must be tagged UTC.
+
+    Leaking naive ts into CanonicalTraceEvent causes every downstream
+    ``fromisoformat`` + UTC arithmetic to crash with "can't subtract
+    offset-naive and offset-aware datetimes". The normalizer (now a thin
+    wrapper around ``utils.timestamps.to_canonical_ts``) parses, tags naive
+    input as UTC, **converts non-UTC offsets to UTC** (canonical contract),
+    truncates sub-ms precision, and falls back to now() on unparseable input.
+    """
+    naive = _normalize_session_ts("2026-04-15T07:21:59.336779")
+    assert naive == "2026-04-15T07:21:59.336+00:00"
+
+    z_form = _normalize_session_ts("2026-04-15T07:21:59.336779Z")
+    assert z_form == "2026-04-15T07:21:59.336+00:00"
+
+    # Non-UTC offset is converted to UTC (07:21:59 +05:30 → 01:51:59 UTC).
+    explicit_offset = _normalize_session_ts("2026-04-15T07:21:59.336779+05:30")
+    assert explicit_offset == "2026-04-15T01:51:59.336+00:00"
+
+    # Unparseable / missing → fall through to now(UTC); numeric is treated
+    # as epoch seconds by the canonical helper, so 12345 is no longer
+    # "garbage" — it parses as 1970-01-01T03:25:45 UTC.
+    for bad_input in ("", None, "not-a-timestamp"):
+        fallback = _normalize_session_ts(bad_input)
+        assert fallback.endswith("+00:00")
+
+
+def test_read_nanobot_session_normalizes_naive_session_timestamps(
+    isolated_run_dir: Path,
+) -> None:
+    """Regression: nanobot used to pass naive session.jsonl ts through verbatim.
+
+    End-to-end check that a session log with naive ``timestamp`` fields yields
+    only tz-aware ts on the returned trace events — matching the convention
+    every other adapter already follows.
+    """
+    session_dir = isolated_run_dir / "runtime" / "sessions"
+    session_dir.mkdir(parents=True)
+    session_path = session_dir / "naive-session.jsonl"
+    session_path.write_text(
+        "\n".join(
+            [
+                # naive (no offset) — this is the real-world nanobot signature
+                json.dumps({"role": "user", "content": "hi", "timestamp": "2026-04-15T07:21:59.336779"}),
+                json.dumps(
+                    {
+                        "role": "assistant",
+                        "content": "hello",
+                        "timestamp": "2026-04-15T07:21:59.337100",
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    session_data = _read_nanobot_session(str(isolated_run_dir / "runtime"), "naive-session")
+
+    assert len(session_data["trace"]) == 2
+    for event in session_data["trace"]:
+        # Every emitted ts must be tz-aware — no naive strings leak out
+        assert event.ts is not None
+        assert event.ts.endswith("+00:00")
+
+
+@pytest.mark.asyncio
+async def test_nanobot_timeout_surfaces_session_recovery_failure_as_infra_details(
+    isolated_run_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Timeout + unreadable session.jsonl must not look like a clean timeout.
+
+    Previously ``except Exception: pass`` swallowed recovery failures silently,
+    making "timeout with no recoverable state" and "timeout + corrupted
+    session log" indistinguishable in downstream reports. The fix narrows
+    the exception list and stamps the failure reason into
+    ``infra_error_details`` so the two cases stay separable.
+    """
+    runtime_config = RuntimeConfig(
+        project_root=isolated_run_dir,
+        providers={
+            "relay": ProviderConfig(
+                base_url="https://relay.example.com/v1",
+                api_key="openai-key",
+                api_format="openai-responses",
+            )
+        },
+    )
+    executor = RecordingExecutor(
+        runtime_config,
+        SubprocessResult(stdout="", stderr="", exit_code=0, timed_out=True),
+    )
+    adapter = NanobotAdapter(runtime_config, executor)
+    task = Task(
+        id="nanobot.regression.timeout-recovery-error",
+        category="skills",
+        description="nanobot timeout + session recovery failure",
+        user_query="Reply with NANOBOT_OK.",
+        workspace_files=[{"path": "README.md", "content": "seed\n"}],
+        timeout_sec=30,
+    )
+    prepared = adapter.prepare(task, "nanobot-timeout-recovery-error")
+
+    def _raise_corrupt(runtime_dir: str, session_id: str) -> dict:
+        raise ValueError("session jsonl line 3 not valid json")
+
+    monkeypatch.setattr(
+        "agent_harness_eval.adapters.nanobot._read_nanobot_session",
+        _raise_corrupt,
+    )
+
+    try:
+        result = await adapter.run(prepared, "relay:gpt-5.4")
+
+        assert result.status == "timed_out"
+        # Empty recovery: trace stays empty, usage stays at zeros
+        assert result.trace == []
+        assert result.metrics.total_tokens == 0
+        # But the *reason* recovery failed must be preserved, not swallowed
+        assert result.infra_error_details is not None
+        assert "session.jsonl recovery failed" in result.infra_error_details
+        assert "ValueError" in result.infra_error_details
+    finally:
+        adapter.cleanup(prepared)
+
+
+@pytest.mark.asyncio
+async def test_nanobot_run_recovers_trace_and_usage_on_timeout(
+    isolated_run_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_config = RuntimeConfig(
+        project_root=isolated_run_dir,
+        providers={
+            "relay": ProviderConfig(
+                base_url="https://relay.example.com/v1",
+                api_key="openai-key",
+                api_format="openai-responses",
+            )
+        },
+    )
+    executor = RecordingExecutor(
+        runtime_config,
+        SubprocessResult(stdout="", stderr="", exit_code=0, timed_out=True),
+    )
+    adapter = NanobotAdapter(runtime_config, executor)
+    task = Task(
+        id="nanobot.regression.timeout-recovery",
+        category="skills",
+        description="nanobot timeout recovery",
+        user_query="Reply with NANOBOT_OK.",
+        workspace_files=[{"path": "README.md", "content": "seed\n"}],
+        timeout_sec=30,
+    )
+    prepared = adapter.prepare(task, "nanobot-timeout-recovery")
+
+    monkeypatch.setattr(
+        "agent_harness_eval.adapters.nanobot._read_nanobot_session",
+        lambda runtime_dir, session_id: {
+            "trace": [
+                CanonicalTraceEvent(
+                    type="message",
+                    role="assistant",
+                    text="Recovered timeout answer",
+                    ts="2026-01-01T00:00:00+00:00",
+                )
+            ],
+            "usage": {
+                "input": 15,
+                "output": 7,
+                "cache_read": 2,
+                "cache_write": 1,
+                "total_tokens": 25,
+                "tool_calls": 3,
+                "turns": 2,
+            },
+        },
+    )
+
+    try:
+        result = await adapter.run(prepared, "relay:gpt-5.4")
+
+        assert result.status == "timed_out"
+        assert result.final_text == "Recovered timeout answer"
+        assert result.trace and result.trace[0].type == "message"
+        assert result.metrics.input_tokens == 15
+        assert result.metrics.output_tokens == 7
+        assert result.metrics.cache_read_tokens == 2
+        assert result.metrics.cache_write_tokens == 1
+        assert result.metrics.total_tokens == 25
+        assert result.metrics.tool_calls == 3
+        assert result.metrics.turns == 2
     finally:
         adapter.cleanup(prepared)

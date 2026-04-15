@@ -9,7 +9,7 @@ import asyncio
 import json
 import os
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, ClassVar
 
 from ..config.providers import parse_model_spec
@@ -20,6 +20,7 @@ from ..types import CanonicalTraceEvent, RunMetrics, RunResult
 from ..utils.conversation import format_task_message
 from ..utils.cost import calculate_cost
 from ..utils.failure_origin import detect_failure_origin_from_error
+from ..utils.timestamps import task_completion_ts, to_canonical_ts
 from ..utils.workspace import create_run_layout, remove_workspace
 from . import register_adapter
 from .interface import (
@@ -155,7 +156,7 @@ class ClaudeCodeAdapter(HarnessAdapter):
                     CanonicalTraceEvent(
                         type="task_failed",
                         error=subprocess_failure.error,
-                        ts=datetime.now(UTC).isoformat(),
+                        ts=to_canonical_ts(),
                     )
                 ],
                 RunMetrics(latency_sec=latency_sec),
@@ -180,7 +181,7 @@ class ClaudeCodeAdapter(HarnessAdapter):
             trace.append(
                 CanonicalTraceEvent(
                     type="task_completed",
-                    ts=datetime.now(UTC).isoformat(),
+                    ts=task_completion_ts(trace),
                 )
             )
 
@@ -226,7 +227,7 @@ class ClaudeCodeAdapter(HarnessAdapter):
                     CanonicalTraceEvent(
                         type="task_failed",
                         error=error[:800],
-                        ts=datetime.now(UTC).isoformat(),
+                        ts=to_canonical_ts(),
                     )
                 ],
                 RunMetrics(latency_sec=latency_sec),
@@ -334,12 +335,11 @@ def _events_to_trace(events: list[dict[str, Any]]) -> list[CanonicalTraceEvent]:
     trace: list[CanonicalTraceEvent] = []
     # Track pending tool_use blocks to pair with their results
     pending_tools: list[dict[str, Any]] = []
+    last_ts: datetime | None = None
 
     for event in events:
         event_type = event.get("type", "")
-        ts = event.get("timestamp") or datetime.now(UTC).isoformat()
-        if isinstance(ts, (int, float)):
-            ts = datetime.fromtimestamp(ts / 1000, tz=UTC).isoformat()
+        ts, last_ts = _normalize_canonical_timestamp(event.get("timestamp"), last_ts)
 
         if event_type == "assistant":
             # assistant events have message.content[] with blocks
@@ -414,17 +414,14 @@ def _events_to_trace(events: list[dict[str, Any]]) -> list[CanonicalTraceEvent]:
                     )
                 )
 
-        elif event_type == "result":
-            text = event.get("result", "")
-            if text:
-                trace.append(
-                    CanonicalTraceEvent(
-                        type="message",
-                        role="assistant",
-                        text=text,
-                        ts=ts,
-                    )
-                )
+        # NOTE: claude-code's stream emits the final assistant text TWICE —
+        # once as the trailing ``assistant`` event's text block (handled
+        # above), and once more as the ``result`` event's ``result`` field.
+        # Adding a message for the ``result`` event produces an adjacent
+        # duplicate in the canonical trace (observed in v2, 4/4 claude-code
+        # completed runs had a 1ms-apart dup). We deliberately do NOT emit a
+        # message for the ``result`` event — its role is final-answer
+        # extraction (_extract_final_text reads it separately).
 
     # Orphaned pending tools (agent crashed before result)
     for pending in pending_tools:
@@ -439,6 +436,53 @@ def _events_to_trace(events: list[dict[str, Any]]) -> list[CanonicalTraceEvent]:
         )
 
     return trace
+
+
+def _normalize_canonical_timestamp(raw_ts: Any, last_ts: datetime | None) -> tuple[str, datetime]:
+    """Return a monotonic canonical timestamp for a streamed Claude event.
+
+    Claude's stream timestamps are useful provenance, but they are not stable
+    enough to use directly as canonical event ordering: ``assistant`` events
+    lack a top-level ``timestamp`` while ``user`` events carrying tool_result
+    blocks do, and their real ts is usually earlier than the synthetic fill
+    we'd pick for the preceding assistant event. Canonical traces should
+    reflect the order we received and processed events, so we treat the
+    source timestamp as a lower-bound hint and enforce a strictly
+    non-decreasing sequence.
+
+    When an event has no usable timestamp, inherit from ``last_ts`` rather
+    than ``datetime.now(UTC)``: now() reflects PARSE time (often 30+s after
+    the stream arrived), which would poison every subsequent real ts by
+    pushing the monotonic floor far into the future. Falling back to
+    last_ts keeps synthetic events close to their neighbors so that real
+    timestamps coming in later can still be preserved as-is.
+
+    Bumps colliding events by 1ms (canonical contract is millisecond
+    precision — see ``utils/timestamps.py``). A burst of N synthetic events
+    drifts forward by N ms, which is still below the gap to the next real
+    harness event.
+    """
+    parsed: datetime | None = None
+    if isinstance(raw_ts, (int, float)):
+        parsed = datetime.fromtimestamp(raw_ts / 1000, tz=UTC)
+    elif isinstance(raw_ts, str) and raw_ts:
+        try:
+            parsed = datetime.fromisoformat(raw_ts)
+        except ValueError:
+            parsed = None
+
+    if parsed is None:
+        parsed = last_ts if last_ts is not None else datetime.now(UTC)
+
+    # Truncate to ms (canonical granularity) BEFORE the monotonicity check so
+    # the emitted ts strings stay strictly increasing — comparing at μs would
+    # let two events at e.g. 12.345678 / 12.345679 both emit "12.345".
+    parsed = parsed.replace(microsecond=(parsed.microsecond // 1000) * 1000)
+
+    if last_ts is not None and parsed <= last_ts:
+        parsed = last_ts + timedelta(milliseconds=1)
+
+    return to_canonical_ts(parsed), parsed
 
 
 def _extract_final_text(events: list[dict[str, Any]]) -> str:

@@ -10,7 +10,6 @@ import asyncio
 import json
 import os
 import re
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -22,6 +21,7 @@ from ..types import CanonicalTraceEvent, RunMetrics, RunResult
 from ..utils.conversation import format_task_message
 from ..utils.cost import calculate_cost
 from ..utils.failure_origin import detect_failure_origin_from_error
+from ..utils.timestamps import task_completion_ts, to_canonical_ts
 from ..utils.workspace import create_run_layout, remove_workspace
 from . import register_adapter
 from .interface import (
@@ -131,7 +131,7 @@ class ZeroClawAdapter(HarnessAdapter):
                     CanonicalTraceEvent(
                         type="task_failed",
                         error=onboard_failure.error,
-                        ts=datetime.now(UTC).isoformat(),
+                        ts=to_canonical_ts(),
                     )
                 ],
                 RunMetrics(latency_sec=latency_sec),
@@ -192,7 +192,7 @@ class ZeroClawAdapter(HarnessAdapter):
                     CanonicalTraceEvent(
                         type="task_failed",
                         error=subprocess_failure.error,
-                        ts=datetime.now(UTC).isoformat(),
+                        ts=to_canonical_ts(),
                     )
                 ],
                 RunMetrics(latency_sec=latency_sec),
@@ -213,7 +213,7 @@ class ZeroClawAdapter(HarnessAdapter):
             trace.append(
                 CanonicalTraceEvent(
                     type="task_completed",
-                    ts=datetime.now(UTC).isoformat(),
+                    ts=task_completion_ts(trace),
                 )
             )
 
@@ -259,7 +259,7 @@ class ZeroClawAdapter(HarnessAdapter):
                     CanonicalTraceEvent(
                         type="task_failed",
                         error=error[:800],
-                        ts=datetime.now(UTC).isoformat(),
+                        ts=to_canonical_ts(),
                     )
                 ],
                 RunMetrics(latency_sec=latency_sec),
@@ -380,6 +380,22 @@ def _patch_zeroclaw_autonomy_config(
         f.write(content)
 
 
+def _normalize_runtime_trace_ts(raw: Any) -> str:
+    """Normalize ZeroClaw's runtime_trace.jsonl ``timestamp`` to the canonical
+    millisecond-precision UTC ISO form.
+
+    ZeroClaw emits nanosecond-precision timestamps (9 fractional-second digits,
+    e.g. ``2026-04-15T08:53:57.840372668+00:00``) that no other adapter
+    produces. The shared ``to_canonical_ts`` helper truncates to milliseconds
+    (canonical contract — see ``utils/timestamps.py``), keeping the serialized
+    trace consistent across harnesses.
+
+    Also accepts numeric epoch timestamps (seconds or millis, heuristic on
+    magnitude) and ``None``; in those cases falls back to now().
+    """
+    return to_canonical_ts(raw)
+
+
 def _read_zeroclaw_runtime_trace(trace_path: str) -> dict[str, Any]:
     """Parse a ZeroClaw runtime_trace.jsonl file for token usage and tool events.
 
@@ -415,9 +431,7 @@ def _read_zeroclaw_runtime_trace(trace_path: str) -> dict[str, Any]:
                 continue
 
             event_type = event.get("event_type") or event.get("type") or ""
-            ts = event.get("timestamp") or event.get("ts") or datetime.now(UTC).isoformat()
-            if isinstance(ts, (int, float)):
-                ts = datetime.fromtimestamp(ts / 1000 if ts > 1e12 else ts, tz=UTC).isoformat()
+            ts = _normalize_runtime_trace_ts(event.get("timestamp") or event.get("ts"))
 
             # ZeroClaw nests data under "payload"; fall back to top-level.
             payload = event.get("payload") or {}
@@ -428,13 +442,21 @@ def _read_zeroclaw_runtime_trace(trace_path: str) -> dict[str, Any]:
                 usage["turns"] += 1
                 input_t = int(payload.get("input_tokens", 0))
                 output_t = int(payload.get("output_tokens", 0))
+                # ZeroClaw's runtime_trace.jsonl exposes only ONE cache-related
+                # field, ``cached_input_tokens`` — which maps to Anthropic's
+                # ``cache_read_input_tokens``. It does NOT emit a separate
+                # ``cache_creation_input_tokens``, so there is no way to recover
+                # the cache-write token count from the trace. The previous
+                # ``payload.get("cache_creation_input_tokens", 0)`` was dead
+                # code and caused ``cache_write_tokens`` to be permanently 0
+                # from zeroclaw, under-reporting cost (cache writes are billed
+                # at ~1.25x base input). Any future fix requires zeroclaw to
+                # expose the field.
                 cache_read = int(payload.get("cached_input_tokens", 0))
-                cache_write = int(payload.get("cache_creation_input_tokens", 0))
                 usage["input"] += input_t
                 usage["output"] += output_t
                 usage["cache_read"] += cache_read
-                usage["cache_write"] += cache_write
-                usage["total_tokens"] += input_t + output_t + cache_read + cache_write
+                usage["total_tokens"] += input_t + output_t + cache_read
 
                 content = payload.get("raw_response") or payload.get("text")
                 if isinstance(content, str) and content.strip():
@@ -480,17 +502,13 @@ def _read_zeroclaw_runtime_trace(trace_path: str) -> dict[str, Any]:
                     )
                 )
 
-            elif event_type == "turn_final_response":
-                content = payload.get("text")
-                if isinstance(content, str) and content.strip():
-                    trace.append(
-                        CanonicalTraceEvent(
-                            type="message",
-                            role="assistant",
-                            text=content.strip(),
-                            ts=ts,
-                        )
-                    )
+            # NOTE: ``turn_final_response`` is zeroclaw's end-of-turn summary
+            # event that repeats the same text as the preceding
+            # ``llm_response`` event's ``raw_response`` field (observed in
+            # v2: 4/4 zeroclaw completed runs had a 2-4ms-apart duplicate
+            # message at the trace tail). We deliberately skip message
+            # emission for this event; the llm_response branch above has
+            # already captured the assistant text once.
 
     # Close any pending tool calls that never got a result.
     for tool_name in pending_tools.values():
@@ -500,7 +518,7 @@ def _read_zeroclaw_runtime_trace(trace_path: str) -> dict[str, Any]:
                 tool_name=tool_name,
                 success=False,
                 output="<no result recorded>",
-                ts=datetime.now(UTC).isoformat(),
+                ts=to_canonical_ts(),
             )
         )
 

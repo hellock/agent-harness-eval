@@ -9,6 +9,7 @@ import pytest
 
 from agent_harness_eval.adapters.zeroclaw import (
     ZeroClawAdapter,
+    _normalize_runtime_trace_ts,
     _patch_zeroclaw_autonomy_config,
     _read_zeroclaw_runtime_trace,
 )
@@ -403,6 +404,52 @@ def test_patch_zeroclaw_autonomy_config_relaxes_shell_policy_for_docker(tmp_path
     assert "require_approval_for_medium_risk = false" in content
 
 
+def test_normalize_runtime_trace_ts_truncates_nanoseconds_to_milliseconds() -> None:
+    # Real zeroclaw samples emit 9-digit fractional seconds; the canonical
+    # contract is millisecond precision (utils.timestamps.to_canonical_ts),
+    # so anything sub-ms must be silently truncated.
+    from datetime import datetime as _dt
+
+    ns_precision = "2026-04-15T08:53:57.840372668+00:00"
+    result = _normalize_runtime_trace_ts(ns_precision)
+    assert result == "2026-04-15T08:53:57.840+00:00"
+    reparsed = _dt.fromisoformat(result)
+    assert reparsed.tzinfo is not None
+    # ms precision → microsecond is a multiple of 1000.
+    assert reparsed.microsecond % 1000 == 0
+    assert reparsed.microsecond == 840_000
+
+
+def test_normalize_runtime_trace_ts_forces_utc_on_naive_input() -> None:
+    from datetime import datetime as _dt
+
+    result = _normalize_runtime_trace_ts("2026-04-12T10:00:00")
+    reparsed = _dt.fromisoformat(result)
+    assert reparsed.tzinfo is not None
+    assert reparsed.utcoffset().total_seconds() == 0
+
+
+def test_normalize_runtime_trace_ts_accepts_numeric_epoch() -> None:
+    from datetime import datetime as _dt
+
+    # Seconds since epoch (≤ 1e12).
+    secs = _normalize_runtime_trace_ts(1_700_000_000)
+    assert _dt.fromisoformat(secs).year == 2023
+
+    # Millis since epoch (> 1e12) — same instant, scaled.
+    millis = _normalize_runtime_trace_ts(1_700_000_000_000)
+    assert _dt.fromisoformat(millis).year == 2023
+
+
+def test_normalize_runtime_trace_ts_falls_back_to_now_on_garbage() -> None:
+    from datetime import datetime as _dt
+
+    for bad in (None, "", "not-a-timestamp", "2026-13-40"):
+        result = _normalize_runtime_trace_ts(bad)
+        reparsed = _dt.fromisoformat(result)
+        assert reparsed.tzinfo is not None
+
+
 def test_read_zeroclaw_runtime_trace_missing_file() -> None:
     result = _read_zeroclaw_runtime_trace("/nonexistent/path/trace.jsonl")
     assert result["trace"] == []
@@ -424,7 +471,10 @@ def test_read_zeroclaw_runtime_trace_parses_events() -> None:
                     "input_tokens": 500,
                     "output_tokens": 200,
                     "cached_input_tokens": 50,
-                    "cache_creation_input_tokens": 30,
+                    # NOTE: zeroclaw's runtime_trace.jsonl does not expose
+                    # cache-creation (cache-write) tokens — only
+                    # ``cached_input_tokens`` (= cache_read). The adapter
+                    # therefore reports cache_write as 0 for this harness.
                     "raw_response": "I will read the file.",
                 },
             },
@@ -466,8 +516,12 @@ def test_read_zeroclaw_runtime_trace_parses_events() -> None:
         assert usage["input"] == 1300
         assert usage["output"] == 600
         assert usage["cache_read"] == 50
-        assert usage["cache_write"] == 30
-        assert usage["total_tokens"] == 1980
+        # zeroclaw does not emit cache_creation_input_tokens in its runtime
+        # trace, so the adapter reports cache_write as 0 unconditionally.
+        assert usage["cache_write"] == 0
+        # total = input (1300) + output (600) + cache_read (50) = 1950.
+        # cache_write is not added because zeroclaw does not expose it.
+        assert usage["total_tokens"] == 1950
         assert usage["tool_calls"] == 2
         assert usage["turns"] == 2
 
@@ -483,6 +537,47 @@ def test_read_zeroclaw_runtime_trace_parses_events() -> None:
         assert trace[2].success is True
         assert trace[3].tool_name == "write_file"
         assert trace[3].input == {"path": "src/cache.ts", "content": "new code"}
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_read_zeroclaw_runtime_trace_dedupes_turn_final_response() -> None:
+    """Regression: v2 showed 4/4 zeroclaw completed runs with two adjacent
+    identical assistant messages 2-4ms apart — llm_response.raw_response
+    followed by turn_final_response.text carrying the same text. After the
+    fix, only the llm_response branch emits a trace message; turn_final_
+    response is consumed for usage/metadata only (today: ignored for trace).
+    """
+    root = Path(tempfile.mkdtemp(prefix="agent-harness-eval-test-"))
+    try:
+        trace_path = root / "runtime_trace.jsonl"
+        events = [
+            {
+                "event_type": "llm_response",
+                "timestamp": "2026-04-15T10:00:00.100+00:00",
+                "payload": {
+                    "input_tokens": 100,
+                    "output_tokens": 50,
+                    "raw_response": "the final answer",
+                },
+            },
+            {
+                "event_type": "turn_final_response",
+                "timestamp": "2026-04-15T10:00:00.103+00:00",
+                "payload": {"text": "the final answer"},
+            },
+        ]
+        trace_path.write_text("\n".join(json.dumps(e) for e in events) + "\n", encoding="utf-8")
+
+        result = _read_zeroclaw_runtime_trace(str(trace_path))
+        trace = result["trace"]
+
+        assistant_msgs = [e for e in trace if e.type == "message" and e.role == "assistant"]
+        assert len(assistant_msgs) == 1, (
+            f"expected exactly 1 assistant message, got {len(assistant_msgs)}: "
+            f"{[(e.ts, e.text) for e in assistant_msgs]}"
+        )
+        assert assistant_msgs[0].text == "the final answer"
     finally:
         shutil.rmtree(root, ignore_errors=True)
 

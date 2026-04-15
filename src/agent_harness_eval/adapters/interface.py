@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from typing import ClassVar
 
 from ..config.providers import ApiFormat, ModelSpec, ProviderConfig
@@ -21,6 +20,7 @@ from ..types import CanonicalTraceEvent, FailureOrigin, RunMetrics, RunResult
 from ..utils.cost import ModelPricing
 from ..utils.failure_origin import detect_failure_origin_from_error
 from ..utils.subprocess import SubprocessResult
+from ..utils.timestamps import to_canonical_ts
 from ..utils.workspace import RunLayout
 
 
@@ -285,7 +285,7 @@ class HarnessAdapter(ABC):
                     CanonicalTraceEvent(
                         type="task_failed",
                         error=failure.error,
-                        ts=datetime.now(UTC).isoformat(),
+                        ts=to_canonical_ts(),
                     )
                 ],
                 RunMetrics(latency_sec=0),
@@ -305,7 +305,26 @@ class HarnessAdapter(ABC):
         metrics: RunMetrics,
         failure_origin: FailureOrigin | None = None,
         infra_error_code: str | None = None,
+        infra_error_details: str | None = None,
     ) -> RunResult:
+        # Stamp default infra fields for ``timed_out`` so downstream metrics
+        # (infra_failure_count, failure_taxonomy) actually see timeouts. Until
+        # this default existed, every timeout left ``failure_origin`` and
+        # ``infra_error_code`` as ``None``, so reports treated timeouts as
+        # "no infra problem" — observed in the v2 rerun, where claude-code
+        # and nanobot each had a skills.02 timeout but reports showed
+        # ``infra_failure_count=0`` for both. Adapters MAY override (e.g.
+        # nanobot post-mutates ``infra_error_details`` when session-recovery
+        # itself fails), but most don't.
+        if status == "timed_out":
+            failure_origin = failure_origin or "adapter"
+            infra_error_code = infra_error_code or "harness_timeout"
+            if infra_error_details is None:
+                infra_error_details = f"hit harness timeout after {task.timeout_sec}s"
+        elif status == "failed" and infra_error_details is None:
+            infra_error_details = final_text[:ERROR_DETAIL_MAX_CHARS]
+
+        keep_failure_fields = status in ("failed", "timed_out")
         return RunResult(
             task_id=task.id,
             harness=self.name,
@@ -318,9 +337,9 @@ class HarnessAdapter(ABC):
             trace=trace,
             metrics=metrics,
             grader_results=[],
-            failure_origin=failure_origin if status == "failed" else None,
-            infra_error_code=infra_error_code if status == "failed" else None,
-            infra_error_details=final_text[:ERROR_DETAIL_MAX_CHARS] if status == "failed" else None,
+            failure_origin=failure_origin if keep_failure_fields else None,
+            infra_error_code=infra_error_code if keep_failure_fields else None,
+            infra_error_details=infra_error_details if keep_failure_fields else None,
         )
 
     @abstractmethod
