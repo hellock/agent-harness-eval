@@ -237,3 +237,133 @@ def test_generate_multi_model_summary_and_reports_write_expected_files(isolated_
     summary = (root / "reports" / "summary.md").read_text()
     assert "# Multi-Model Evaluation Matrix" in summary
     assert "## Failure Taxonomy" in summary
+
+
+def test_generate_reports_single_harness_multi_model_uses_dedicated_layout(
+    isolated_temp_dir: Path,
+) -> None:
+    """1 harness x N models should not degenerate into the 1-row 'matrix' layout.
+
+    The dedicated layout must surface: Setup (with executor + per-model list),
+    a per-model headline table with full metric columns, a task x model matrix
+    with winner column, a category x model breakdown, and per-model judge stats.
+    """
+    output_dir = str(isolated_temp_dir / "single-harness-multi-model")
+    model_a = ModelSpec(provider="openai", model="gpt-5.4")
+    model_b = ModelSpec(provider="anthropic", model="claude-sonnet-4-6")
+    judge = ModelSpec(provider="anthropic", model="claude-sonnet-4-6")
+    config = EvalConfig(
+        model_spec=model_a,
+        models=[model_a, model_b],
+        harnesses=["codex"],
+        runs_per_task=1,
+        judge_model_spec=judge,
+        output_dir=output_dir,
+        timeout_sec=30,
+    )
+    tasks = [
+        Task(id="coding.01", category="coding", description="code", user_query="q", timeout_sec=30),
+        Task(id="reasoning.02", category="reasoning", description="reason", user_query="q", timeout_sec=30),
+    ]
+
+    def _judged_result(*, task_id: str, model: str, passed: bool, judge_score: float) -> RunResult:
+        r = _make_result(task_id=task_id, harness="codex", model=model, passed=passed)
+        r.grader_results.append(
+            GraderResult(
+                grader_type="rubric_judge",
+                name="quality",
+                passed=judge_score >= 0.5,
+                score=judge_score,
+            )
+        )
+        return r
+
+    results = [
+        _judged_result(task_id="coding.01", model=model_a.label, passed=True, judge_score=0.9),
+        _judged_result(task_id="coding.01", model=model_b.label, passed=True, judge_score=0.8),
+        _judged_result(task_id="reasoning.02", model=model_a.label, passed=False, judge_score=0.3),
+        _judged_result(task_id="reasoning.02", model=model_b.label, passed=True, judge_score=0.7),
+    ]
+
+    from agent_harness_eval.config.runtime import RuntimeConfig
+
+    runtime_config = RuntimeConfig(
+        project_root=isolated_temp_dir,
+        executor_backend="docker",
+        harness_config={"codex": {"version": "0.118.0"}},
+    )
+
+    generate_reports(results, tasks, config, runtime_config=runtime_config)
+
+    root = Path(output_dir)
+    summary = (root / "reports" / "summary.md").read_text()
+
+    # Title / routing
+    assert "Evaluation Summary — Codex across 2 models" in summary
+    assert "# Multi-Model Evaluation Matrix" not in summary  # must NOT fall through to generic layout
+
+    # 1. Setup — version, executor, per-model listing, judge, tasks count
+    assert "## 1. Setup" in summary
+    assert "| 0.118.0" in summary
+    assert "**Executor:** docker" in summary
+    assert "- **Models (2):**" in summary
+    assert "- **Tasks:** 2 (coding, reasoning)" in summary
+    assert f"- **Judge model:** `{judge.label}`" in summary
+
+    # 2. Model Comparison — full metric columns
+    assert "## 2. Model Comparison" in summary
+    for col in ("Pass Rate", "Avg Quality", "Mean Time", "Mean Tokens", "Mean Cost", "Mean Tools", "Timeout%"):
+        assert col in summary
+    # Narrative winner line: model_b wins (2/2 pass, higher mean judge quality)
+    assert f"`{model_b.label}` led on pass rate" in summary
+
+    # 3. Per-Task Breakdown — rows per task, winner column
+    assert "## 3. Per-Task Breakdown" in summary
+    # coding.01: both pass, judge 0.9 vs 0.8 → model_a wins on quality tiebreak
+    # reasoning.02: model_b wins outright
+    assert "coding.01" in summary
+    assert "reasoning.02" in summary
+    assert f"`{model_a.label}`" in summary and f"`{model_b.label}`" in summary
+
+    # 4. Category x Model
+    assert "## 4. Category x Model" in summary
+    assert "Coding" in summary and "Reasoning" in summary
+
+    # 5. Judge Summary per model
+    assert "## 5. Judge Summary" in summary
+    # per-model rows with judge stats
+    assert "Median" in summary
+    # 4 judge evaluations split 2-per-model
+    assert " | 2 " in summary  # Evaluations count
+
+
+def test_generate_reports_single_harness_multi_model_does_not_crown_tied_models(
+    isolated_temp_dir: Path,
+) -> None:
+    output_dir = str(isolated_temp_dir / "single-harness-multi-model-tie")
+    model_a = ModelSpec(provider="openai", model="gpt-5.4")
+    model_b = ModelSpec(provider="anthropic", model="claude-sonnet-4-6")
+    config = EvalConfig(
+        model_spec=model_a,
+        models=[model_a, model_b],
+        harnesses=["codex"],
+        runs_per_task=1,
+        output_dir=output_dir,
+        timeout_sec=30,
+    )
+    tasks = [
+        Task(id="reasoning.02", category="reasoning", description="reason", user_query="q", timeout_sec=30),
+    ]
+    results = [
+        _make_result(task_id="reasoning.02", harness="codex", model=model_a.label, passed=False),
+        _make_result(task_id="reasoning.02", harness="codex", model=model_b.label, passed=False),
+    ]
+
+    generate_reports(results, tasks, config)
+
+    root = Path(output_dir)
+    summary = (root / "reports" / "summary.md").read_text()
+
+    assert f"`{model_a.label}` and `{model_b.label}` tied on pass rate and overall quality." in summary
+    assert f"`{model_a.label}` led on pass rate" not in summary
+    assert f"`{model_b.label}` led on pass rate" not in summary
