@@ -193,6 +193,52 @@ def test_wrap_docker_uses_cwd_without_narrowing_workspace_mount(
     assert command.args[workdir_index + 1] == str(repo_dir)
 
 
+def test_wrap_docker_rewrites_host_shell_to_container_shell(
+    isolated_run_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SHELL", "/usr/bin/zsh")
+
+    runtime_config = RuntimeConfig(
+        project_root=isolated_run_dir,
+        harness_config={"nanobot": {"version": "latest"}},
+        _process_env={"SHELL": "/usr/bin/zsh"},
+    )
+    executor = DockerExecutor(runtime_config)
+    command = executor._wrap(
+        "nanobot",
+        ExecutionPolicy(workspace_dir=str(isolated_run_dir / "workspace")),
+        "python",
+        ["-V"],
+        {"SHELL": "/usr/bin/zsh"},
+    )
+
+    assert any(arg == "--env" for arg in command.args)
+    assert "SHELL=/bin/sh" in command.args
+    assert "SHELL=/usr/bin/zsh" not in command.args
+
+
+def test_wrap_docker_preserves_adapter_explicit_shell_override(
+    isolated_run_dir: Path,
+) -> None:
+    runtime_config = RuntimeConfig(
+        project_root=isolated_run_dir,
+        harness_config={"nanobot": {"version": "latest"}},
+        _process_env={"SHELL": "/usr/bin/zsh"},
+    )
+    executor = DockerExecutor(runtime_config)
+    command = executor._wrap(
+        "nanobot",
+        ExecutionPolicy(workspace_dir=str(isolated_run_dir / "workspace")),
+        "python",
+        ["-V"],
+        {"SHELL": "/bin/bash"},
+    )
+
+    assert "SHELL=/bin/bash" in command.args
+    assert "SHELL=/bin/sh" not in command.args
+
+
 def test_wrap_docker_uses_network_none_for_strict_network_policy(
     isolated_run_dir: Path,
 ) -> None:

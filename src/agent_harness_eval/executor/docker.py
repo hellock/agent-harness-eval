@@ -6,23 +6,14 @@ import asyncio
 import os
 import re
 import uuid
-from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..utils.subprocess import SubprocessResult, run_subprocess
-from . import ExecutionPolicy, Executor, filter_env, register_executor
+from . import ExecutionPolicy, Executor, WrappedCommand, filter_env, register_executor
 
 if TYPE_CHECKING:
     from ..config.runtime import RuntimeConfig
-
-
-@dataclass
-class _DockerCommand:
-    command: str
-    args: list[str]
-    env: dict[str, str]
-    cwd: str
 
 
 @register_executor
@@ -40,7 +31,7 @@ class DockerExecutor(Executor):
         inner_env: dict[str, str],
         timeout_ms: int,
     ) -> SubprocessResult:
-        wrapped = self._wrap(harness, policy, inner_command, inner_args, inner_env)
+        wrapped = self.wrap_command(harness, policy, inner_command, inner_args, inner_env)
         return await run_subprocess(
             wrapped.command,
             wrapped.args,
@@ -48,6 +39,16 @@ class DockerExecutor(Executor):
             env=wrapped.env,
             timeout_ms=timeout_ms,
         )
+
+    def wrap_command(
+        self,
+        harness: str,
+        policy: ExecutionPolicy,
+        inner_command: str,
+        inner_args: list[str],
+        inner_env: dict[str, str],
+    ) -> WrappedCommand:
+        return self._wrap(harness, policy, inner_command, inner_args, inner_env)
 
     def resolve_binary(self, harness: str, binary: str) -> str:
         """For managed images, return bare binary name (available inside container)."""
@@ -62,7 +63,7 @@ class DockerExecutor(Executor):
         inner_command: str,
         inner_args: list[str],
         inner_env: dict[str, str],
-    ) -> _DockerCommand:
+    ) -> WrappedCommand:
         docker_image = resolve_docker_image(harness, self.runtime_config)
         managed = is_docker_managed_image(harness, self.runtime_config)
         cwd = policy.cwd or policy.workspace_dir
@@ -113,8 +114,19 @@ class DockerExecutor(Executor):
         if uv_home.exists():
             args.extend(["-v", f"{uv_home}:{uv_home}:ro"])
 
-        # Environment variables
-        for key, value in inner_env.items():
+        # Environment variables.
+        # Normalize SHELL in the container: if the caller didn't set it, or set it to
+        # the same value the host is using (i.e. passively inherited from the host env
+        # — e.g. /usr/bin/zsh), force /bin/sh. Container images generally ship only
+        # /bin/sh + sometimes bash, so leaking the host shell path causes "not found"
+        # in subshells. Callers that genuinely want bash must set SHELL to something
+        # other than the host value (e.g. SHELL=/bin/bash).
+        container_env = dict(inner_env)
+        host_shell = self.runtime_config.subprocess_env.get("SHELL")
+        if not container_env.get("SHELL") or container_env.get("SHELL") == host_shell:
+            container_env["SHELL"] = "/bin/sh"
+
+        for key, value in container_env.items():
             args.extend(["--env", f"{key}={value}"])
 
         # Graceful shutdown timeout
@@ -129,7 +141,7 @@ class DockerExecutor(Executor):
         else:
             args.extend([docker_image, inner_command, *inner_args])
 
-        return _DockerCommand(
+        return WrappedCommand(
             command="docker",
             args=args,
             env=filter_env(self.runtime_config.subprocess_env),

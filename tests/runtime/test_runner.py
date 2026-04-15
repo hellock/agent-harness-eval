@@ -11,7 +11,7 @@ import pytest
 from agent_harness_eval.adapters.interface import HarnessAdapter, PreparedRun
 from agent_harness_eval.config.providers import ModelSpec
 from agent_harness_eval.config.runtime import RuntimeConfig
-from agent_harness_eval.executor import ExecutionPolicy, Executor
+from agent_harness_eval.executor import ExecutionPolicy, Executor, WrappedCommand
 from agent_harness_eval.graders.specs import GraderResult
 from agent_harness_eval.runner import (
     RunPlanItem,
@@ -52,6 +52,21 @@ class FakeExecutor(Executor):
         timeout_ms: int,
     ) -> SubprocessResult:
         return SubprocessResult(stdout="", stderr="", exit_code=0, timed_out=False)
+
+    def wrap_command(
+        self,
+        harness: str,
+        policy: ExecutionPolicy,
+        inner_command: str,
+        inner_args: list[str],
+        inner_env: dict[str, str],
+    ) -> WrappedCommand:
+        return WrappedCommand(
+            command=inner_command,
+            args=list(inner_args),
+            env=dict(inner_env),
+            cwd=policy.cwd or policy.workspace_dir,
+        )
 
 
 class FakeAdapter(HarnessAdapter):

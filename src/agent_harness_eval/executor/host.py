@@ -3,18 +3,9 @@
 from __future__ import annotations
 
 import subprocess
-from dataclasses import dataclass
 
 from ..utils.subprocess import SubprocessResult, run_subprocess
-from . import ExecutionPolicy, Executor, register_executor
-
-
-@dataclass
-class _HostCommand:
-    command: str
-    args: list[str]
-    env: dict[str, str]
-    cwd: str
+from . import ExecutionPolicy, Executor, WrappedCommand, register_executor
 
 
 @register_executor
@@ -32,7 +23,7 @@ class HostExecutor(Executor):
         inner_env: dict[str, str],
         timeout_ms: int,
     ) -> SubprocessResult:
-        wrapped = self._wrap(policy, inner_command, inner_args, inner_env)
+        wrapped = self.wrap_command(harness, policy, inner_command, inner_args, inner_env)
         return await run_subprocess(
             wrapped.command,
             wrapped.args,
@@ -40,6 +31,16 @@ class HostExecutor(Executor):
             env=wrapped.env,
             timeout_ms=timeout_ms,
         )
+
+    def wrap_command(
+        self,
+        harness: str,
+        policy: ExecutionPolicy,
+        inner_command: str,
+        inner_args: list[str],
+        inner_env: dict[str, str],
+    ) -> WrappedCommand:
+        return self._wrap(policy, inner_command, inner_args, inner_env)
 
     def restore_workspace(self, workspace_dir: str) -> None:
         """Restore write permissions after a host run."""
@@ -58,7 +59,7 @@ class HostExecutor(Executor):
         inner_command: str,
         inner_args: list[str],
         inner_env: dict[str, str],
-    ) -> _HostCommand:
+    ) -> WrappedCommand:
         cwd = policy.cwd or policy.workspace_dir
         if not policy.file_write:
             try:
@@ -78,7 +79,7 @@ class HostExecutor(Executor):
         if not policy.file_write:
             env_with_constraints["EVAL_BOUNDARY_FILE_WRITE"] = "disabled"
 
-        return _HostCommand(
+        return WrappedCommand(
             command=inner_command,
             args=inner_args,
             env=env_with_constraints,

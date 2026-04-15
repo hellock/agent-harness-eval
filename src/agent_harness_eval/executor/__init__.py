@@ -49,6 +49,14 @@ class VolumeMount:
     mode: Literal["ro", "rw"] = "rw"
 
 
+@dataclass(frozen=True)
+class WrappedCommand:
+    command: str
+    args: list[str]
+    env: dict[str, str]
+    cwd: str
+
+
 # ─── Policy construction ───
 
 
@@ -197,6 +205,32 @@ class Executor(ABC):
     ) -> SubprocessResult:
         """Execute a command under this backend's isolation."""
         ...
+
+    def wrap_command(
+        self,
+        harness: str,
+        policy: ExecutionPolicy,
+        inner_command: str,
+        inner_args: list[str],
+        inner_env: dict[str, str],
+    ) -> WrappedCommand:
+        """Return the fully wrapped command that would be executed — does not run it.
+
+        Use this when an adapter needs the concrete ``argv`` / ``env`` / ``cwd``
+        (e.g. to launch the subprocess via a custom runner that handles early
+        termination, streaming, etc). ``execute()`` is implemented on top of
+        ``wrap_command()`` so both paths share the same command-construction logic.
+
+        The default is a pass-through for simple backends (and test doubles): no
+        extra isolation wrapping. Real isolation backends (host / docker) override
+        this to inject ``docker run …`` or chmod-based restrictions.
+        """
+        return WrappedCommand(
+            command=inner_command,
+            args=list(inner_args),
+            env=dict(inner_env),
+            cwd=policy.cwd or policy.workspace_dir,
+        )
 
     def resolve_binary(self, harness: str, binary: str) -> str:
         """Resolve a harness binary path for this executor's context.
