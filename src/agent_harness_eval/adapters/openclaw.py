@@ -21,6 +21,7 @@ from ..types import CanonicalTraceEvent, RunMetrics, RunResult
 from ..utils.conversation import format_task_message
 from ..utils.cost import calculate_cost
 from ..utils.failure_origin import detect_failure_origin_from_error
+from ..utils.subprocess import SubprocessResult
 from ..utils.workspace import create_run_layout, remove_workspace
 from . import register_adapter
 from .interface import (
@@ -160,13 +161,29 @@ class OpenClawAdapter(HarnessAdapter):
         compound_script = f"{register_cmd} && {agent_cmd}"
         inner_args = ["-c", compound_script]
 
-        result = await self.executor.execute(
+        wrapped = self.executor.wrap_command(
             self.name,
             execution_policy,
             "sh",
             inner_args,
             inner_env,
+        )
+        session_dir = os.path.join(state_dir, "agents", agent_id, "sessions")
+        session_path = os.path.join(session_dir, f"{session_id}.jsonl")
+        helper_result = await _run_openclaw_subprocess_until_json(
+            wrapped.command,
+            wrapped.args,
+            cwd=wrapped.cwd,
+            env=wrapped.env,
             timeout_ms=timeout_ms,
+            session_dir=session_dir,
+            session_path=session_path,
+        )
+        result = SubprocessResult(
+            stdout=helper_result["stdout"],
+            stderr=helper_result["stderr"],
+            exit_code=helper_result["exit_code"],
+            timed_out=helper_result["timed_out"],
         )
 
         latency_sec = asyncio.get_running_loop().time() - start_time
@@ -713,6 +730,7 @@ async def _run_openclaw_subprocess_until_json(
     cwd: str | None = None,
     env: dict[str, str] | None = None,
     timeout_ms: int,
+    session_dir: str | None = None,
     session_path: str | None = None,
 ) -> dict[str, Any]:
     """Run OpenClaw subprocess and terminate once JSON or session output is ready."""
@@ -731,6 +749,7 @@ async def _run_openclaw_subprocess_until_json(
     timed_out = False
     json_seen = False
     session_completed = False
+    completed_early = False
 
     async def read_stream(stream: asyncio.StreamReader, is_stderr: bool = False) -> None:
         nonlocal stdout, stderr
@@ -763,10 +782,11 @@ async def _run_openclaw_subprocess_until_json(
             except ValueError:
                 pass
 
-        if not json_seen and session_path:
-            session_completed = bool(_read_openclaw_session_final_text_from_path(session_path))
+        if not json_seen and session_dir:
+            session_completed = bool(_read_openclaw_session_terminal_text(session_dir, session_path))
 
         if json_seen or session_completed:
+            completed_early = True
             try:
                 proc.terminate()
             except ProcessLookupError:
@@ -792,15 +812,24 @@ async def _run_openclaw_subprocess_until_json(
             pass
         await asyncio.gather(wait_task, return_exceptions=True)
 
-    await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+    await _finalize_openclaw_stream_tasks(stdout_task, stderr_task)
 
     return {
         "stdout": stdout,
         "stderr": stderr,
-        "exit_code": proc.returncode,
+        "exit_code": 0 if completed_early and not timed_out else proc.returncode,
         "timed_out": timed_out,
         "session_completed": session_completed,
     }
+
+
+async def _finalize_openclaw_stream_tasks(*tasks: asyncio.Task[None]) -> None:
+    pending = [task for task in tasks if not task.done()]
+    if pending:
+        _, still_pending = await asyncio.wait(pending, timeout=1)
+        for task in still_pending:
+            task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def _looks_like_tool_failure(text: str) -> bool:
@@ -944,24 +973,57 @@ def _extract_openclaw_final_text(trace: list[CanonicalTraceEvent]) -> str:
     return ""
 
 
-def _read_openclaw_session_final_text_from_path(session_path: str) -> str:
+def _read_openclaw_session_final_text(session_dir: str, session_path: str | None = None) -> str:
     try:
-        with open(session_path) as f:
-            for line in reversed(f.read().splitlines()):
-                if not line.strip():
-                    continue
-                event = json.loads(line)
-                if event.get("type") != "message":
-                    continue
-                message = event.get("message") or {}
-                if message.get("role") != "assistant":
-                    continue
-                content = message.get("content")
-                if not isinstance(content, list):
-                    continue
-                for block in content:
-                    if block.get("type") == "text" and block.get("text"):
-                        return str(block["text"])
+        content = _read_openclaw_session_content(session_dir, session_path or "")
+        for line in reversed(content.splitlines()):
+            if not line.strip():
+                continue
+            event = json.loads(line)
+            if event.get("type") != "message":
+                continue
+            message = event.get("message") or {}
+            if message.get("role") != "assistant":
+                continue
+            content_blocks = message.get("content")
+            if not isinstance(content_blocks, list):
+                continue
+            for block in content_blocks:
+                if block.get("type") == "text" and block.get("text"):
+                    return str(block["text"])
+    except Exception:
+        return ""
+    return ""
+
+
+def _read_openclaw_session_terminal_text(session_dir: str, session_path: str | None = None) -> str:
+    try:
+        content = _read_openclaw_session_content(session_dir, session_path or "")
+        for line in reversed(content.splitlines()):
+            if not line.strip():
+                continue
+            event = json.loads(line)
+            if event.get("type") != "message":
+                continue
+            message = event.get("message") or {}
+            if message.get("role") != "assistant":
+                continue
+
+            content_blocks = message.get("content")
+            if not isinstance(content_blocks, list):
+                continue
+            if any(block.get("type") == "toolCall" for block in content_blocks if isinstance(block, dict)):
+                continue
+            if message.get("stopReason") == "toolUse":
+                continue
+
+            text_parts = [
+                str(block.get("text"))
+                for block in content_blocks
+                if isinstance(block, dict) and block.get("type") == "text" and block.get("text")
+            ]
+            if text_parts:
+                return "".join(text_parts)
     except Exception:
         return ""
     return ""

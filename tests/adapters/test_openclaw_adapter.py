@@ -1,10 +1,17 @@
 from __future__ import annotations
 
+import asyncio
+import json
 from pathlib import Path
 
 import pytest
 
-from agent_harness_eval.adapters.openclaw import OpenClawAdapter
+from agent_harness_eval.adapters.openclaw import (
+    OpenClawAdapter,
+    _finalize_openclaw_stream_tasks,
+    _read_openclaw_session_final_text,
+    _read_openclaw_session_terminal_text,
+)
 from agent_harness_eval.config.providers import ProviderConfig
 from agent_harness_eval.config.runtime import RuntimeConfig
 from agent_harness_eval.executor import VolumeMount, create_executor
@@ -119,13 +126,27 @@ async def test_openclaw_run_builds_register_and_agent_commands_with_private_stat
         },
     )
 
+    async def fake_run_until_json(*args, **kwargs):
+        return {
+            "stdout": "",
+            "stderr": "",
+            "exit_code": 0,
+            "timed_out": False,
+            "session_completed": True,
+        }
+
+    monkeypatch.setattr(
+        "agent_harness_eval.adapters.openclaw._run_openclaw_subprocess_until_json",
+        fake_run_until_json,
+    )
+
     try:
         result = await adapter.run(prepared, "anthropic:claude-sonnet-4-6")
 
         assert result.status == "completed"
         assert result.final_text == "OPENCLAW_OK"
-        assert len(executor.calls) == 1
-        call = executor.calls[0]
+        assert len(executor.wrapped_calls) == 1
+        call = executor.wrapped_calls[0]
         assert call["inner_command"] == "sh"
         args = call["inner_args"]
         assert isinstance(args, list)
@@ -149,6 +170,7 @@ async def test_openclaw_run_builds_register_and_agent_commands_with_private_stat
 @pytest.mark.asyncio
 async def test_openclaw_run_returns_failed_result_on_nonzero_exit(
     isolated_run_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runtime_config = RuntimeConfig(
         project_root=isolated_run_dir,
@@ -180,6 +202,20 @@ async def test_openclaw_run_returns_failed_result_on_nonzero_exit(
         timeout_sec=30,
     )
     prepared = adapter.prepare(task, "openclaw-nonzero-exit")
+
+    async def fake_run_until_json(*args, **kwargs):
+        return {
+            "stdout": "partial agent output",
+            "stderr": "permission denied by sandbox",
+            "exit_code": 2,
+            "timed_out": False,
+            "session_completed": False,
+        }
+
+    monkeypatch.setattr(
+        "agent_harness_eval.adapters.openclaw._run_openclaw_subprocess_until_json",
+        fake_run_until_json,
+    )
 
     try:
         result = await adapter.run(prepared, "anthropic:claude-sonnet-4-6")
@@ -252,6 +288,20 @@ async def test_openclaw_timeout_recovers_partial_session_trace(
         },
     )
 
+    async def fake_run_until_json(*args, **kwargs):
+        return {
+            "stdout": "",
+            "stderr": "",
+            "exit_code": None,
+            "timed_out": True,
+            "session_completed": False,
+        }
+
+    monkeypatch.setattr(
+        "agent_harness_eval.adapters.openclaw._run_openclaw_subprocess_until_json",
+        fake_run_until_json,
+    )
+
     try:
         result = await adapter.run(prepared, "anthropic:claude-sonnet-4-6")
 
@@ -301,3 +351,107 @@ async def test_openclaw_run_fails_fast_when_provider_is_missing(
         assert executor.calls == []
     finally:
         adapter.cleanup(prepared)
+
+
+def test_read_openclaw_session_final_text_falls_back_to_latest_session_file(tmp_path: Path) -> None:
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    latest_path = session_dir / "actual.jsonl"
+    latest_path.write_text(
+        json.dumps(
+            {
+                "type": "message",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "FINAL_ANSWER"}],
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    final_text = _read_openclaw_session_final_text(str(session_dir), str(session_dir / "missing.jsonl"))
+
+    assert final_text == "FINAL_ANSWER"
+
+
+def test_read_openclaw_session_terminal_text_requires_non_tooluse_terminal_message(tmp_path: Path) -> None:
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    latest_path = session_dir / "actual.jsonl"
+    latest_path.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "message",
+                        "message": {
+                            "role": "assistant",
+                            "content": [
+                                {"type": "text", "text": "INTERMEDIATE"},
+                                {"type": "toolCall", "name": "exec", "arguments": {"command": "python -V"}},
+                            ],
+                            "stopReason": "toolUse",
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "message",
+                        "message": {
+                            "role": "assistant",
+                            "content": [{"type": "text", "text": "FINAL_ANSWER"}],
+                            "stopReason": "stop",
+                        },
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    final_text = _read_openclaw_session_terminal_text(str(session_dir), str(session_dir / "missing.jsonl"))
+
+    assert final_text == "FINAL_ANSWER"
+
+
+def test_read_openclaw_session_terminal_text_ignores_intermediate_assistant_text(tmp_path: Path) -> None:
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    latest_path = session_dir / "actual.jsonl"
+    latest_path.write_text(
+        json.dumps(
+            {
+                "type": "message",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "INTERMEDIATE"},
+                        {"type": "toolCall", "name": "exec", "arguments": {"command": "python -V"}},
+                    ],
+                    "stopReason": "toolUse",
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    final_text = _read_openclaw_session_terminal_text(str(session_dir), str(session_dir / "missing.jsonl"))
+
+    assert final_text == ""
+
+
+@pytest.mark.asyncio
+async def test_finalize_openclaw_stream_tasks_cancels_hanging_readers() -> None:
+    async def hanging_reader() -> None:
+        await asyncio.Future()
+
+    task = asyncio.create_task(hanging_reader())
+
+    await _finalize_openclaw_stream_tasks(task)
+
+    assert task.done()
+    assert task.cancelled()
