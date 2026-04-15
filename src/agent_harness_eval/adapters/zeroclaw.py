@@ -114,7 +114,7 @@ class ZeroClawAdapter(HarnessAdapter):
                 task,
                 model,
                 "timed_out",
-                "",
+                _strip_zeroclaw_logs(onboard_result.stdout),
                 [],
                 RunMetrics(latency_sec=task.timeout_sec),
             )
@@ -172,13 +172,33 @@ class ZeroClawAdapter(HarnessAdapter):
         latency_sec = asyncio.get_running_loop().time() - start_time
 
         if result.timed_out:
+            session_data = _read_zeroclaw_runtime_trace(os.path.join(config_dir, "runtime_trace.jsonl"))
+            trace = session_data["trace"]
+            usage = session_data["usage"]
             return self._make_result(
                 task,
                 model,
                 "timed_out",
-                "",
-                [],
-                RunMetrics(latency_sec=task.timeout_sec),
+                _strip_zeroclaw_logs(result.stdout),
+                trace,
+                RunMetrics(
+                    latency_sec=task.timeout_sec,
+                    input_tokens=usage["input"],
+                    output_tokens=usage["output"],
+                    cache_read_tokens=usage["cache_read"],
+                    cache_write_tokens=usage["cache_write"],
+                    total_tokens=usage["total_tokens"],
+                    cost_usd=calculate_cost(
+                        model,
+                        usage["input"],
+                        usage["output"],
+                        usage["cache_read"],
+                        usage["cache_write"],
+                        pricing=self.pricing_override(),
+                    ),
+                    tool_calls=usage["tool_calls"],
+                    turns=usage["turns"],
+                ),
             )
 
         subprocess_failure = detect_subprocess_failure(result, command_label="ZeroClaw")
@@ -348,15 +368,6 @@ def _patch_zeroclaw_autonomy_config(
         flags=re.MULTILINE,
     )
 
-    # Point zeroclaw's workspace to the actual eval workspace
-    # (onboard creates a separate workspace inside config_dir)
-    content = re.sub(
-        r"^workspace_only\s*=\s*true",
-        "workspace_only = false",
-        content,
-        flags=re.MULTILINE,
-    )
-
     # Enable runtime trace for observability (token usage + tool call events).
     trace_path = os.path.join(config_dir, "runtime_trace.jsonl")
     if "[observability]" not in content:
@@ -418,7 +429,15 @@ def _read_zeroclaw_runtime_trace(trace_path: str) -> dict[str, Any]:
     if not os.path.exists(trace_path):
         return {"trace": trace, "usage": usage}
 
-    pending_tools: dict[str, str] = {}
+    # ZeroClaw's runtime_trace does NOT emit a stable ``tool_call_id`` — see
+    # zeroclaw source at src/agent/loop_.rs:3111-3124 (``tool_call_start``)
+    # and :3187-3200 (``tool_call_result``). Both carry ``payload.tool`` (the
+    # tool name) and a positional iteration counter, but no ID. So pairing is
+    # done positionally in arrival order: push tool names onto this queue when
+    # a start arrives, pop the earliest unmatched one when a result arrives.
+    # Anything left over at end of stream = orphan (agent crashed mid-tool) and
+    # gets a synthetic failed ``tool_call_completed``.
+    pending_tools: list[str] = []
 
     with open(trace_path, encoding="utf-8") as f:
         for line in f:
@@ -433,7 +452,9 @@ def _read_zeroclaw_runtime_trace(trace_path: str) -> dict[str, Any]:
             event_type = event.get("event_type") or event.get("type") or ""
             ts = _normalize_runtime_trace_ts(event.get("timestamp") or event.get("ts"))
 
-            # ZeroClaw nests data under "payload"; fall back to top-level.
+            # ZeroClaw nests most call metadata under "payload". But
+            # ``success`` and ``message`` sit at event top-level (upstream
+            # RuntimeTraceEvent shape: observability/runtime_trace.rs:34-52).
             payload = event.get("payload") or {}
             if not isinstance(payload, dict):
                 payload = {}
@@ -486,21 +507,45 @@ def _read_zeroclaw_runtime_trace(trace_path: str) -> dict[str, Any]:
                     )
                 )
                 usage["tool_calls"] += 1
+                pending_tools.append(tool_name)
 
             elif event_type == "tool_call_result":
                 tool_name = payload.get("tool") or "unknown"
+                # ``success`` and ``message`` live at event top-level, NOT
+                # payload. Missing / None → default to True (legacy traces,
+                # or upstream not populating). Only explicit False overrides.
+                raw_success = event.get("success")
+                success = raw_success is not False
                 output = payload.get("output") or ""
                 if not isinstance(output, str):
                     output = json.dumps(output) if output else ""
+                # On failure, if there is no payload.output, surface the
+                # top-level ``message`` (outcome.error_reason from zeroclaw)
+                # so graders / humans see why the tool failed rather than
+                # an empty string.
+                if not success and not output:
+                    message = event.get("message")
+                    if isinstance(message, str) and message:
+                        output = message
                 trace.append(
                     CanonicalTraceEvent(
                         type="tool_call_completed",
                         tool_name=tool_name,
-                        success=True,
+                        success=success,
                         output=output[:TOOL_OUTPUT_MAX_CHARS] if output else None,
                         ts=ts,
                     )
                 )
+                # Pop the earliest pending tool with this name. Positional
+                # matching: if zeroclaw re-orders start/result (unlikely per
+                # upstream loop_.rs emission order but not guaranteed), we
+                # prefer the earliest-queued match by name, then by FIFO.
+                if tool_name in pending_tools:
+                    pending_tools.remove(tool_name)
+                elif pending_tools:
+                    # No name match — pop the earliest regardless; better to
+                    # clear one slot than leak an orphan at tail.
+                    pending_tools.pop(0)
 
             # NOTE: ``turn_final_response`` is zeroclaw's end-of-turn summary
             # event that repeats the same text as the preceding
@@ -510,8 +555,9 @@ def _read_zeroclaw_runtime_trace(trace_path: str) -> dict[str, Any]:
             # emission for this event; the llm_response branch above has
             # already captured the assistant text once.
 
-    # Close any pending tool calls that never got a result.
-    for tool_name in pending_tools.values():
+    # Close any pending tool calls that never got a result (agent crashed
+    # mid-tool, or stream was truncated before tool_call_result arrived).
+    for tool_name in pending_tools:
         trace.append(
             CanonicalTraceEvent(
                 type="tool_call_completed",

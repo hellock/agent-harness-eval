@@ -402,6 +402,82 @@ def test_patch_zeroclaw_autonomy_config_relaxes_shell_policy_for_docker(tmp_path
     assert 'allowed_commands = ["*"]' in content
     assert "block_high_risk_commands = false" in content
     assert "require_approval_for_medium_risk = false" in content
+    assert "workspace_only = true" in content
+
+
+@pytest.mark.asyncio
+async def test_zeroclaw_run_recovers_trace_and_usage_on_timeout(
+    isolated_run_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_config = RuntimeConfig(
+        project_root=isolated_run_dir,
+        providers={
+            "relay": ProviderConfig(
+                base_url="https://relay.example.com/v1",
+                api_key="anthropic-key",
+                api_format="anthropic",
+            )
+        },
+    )
+    executor = SequentialRecordingExecutor(
+        runtime_config,
+        [
+            SubprocessResult(stdout="", stderr="", exit_code=0, timed_out=False),
+            SubprocessResult(stdout="partial output\n", stderr="", exit_code=0, timed_out=True),
+        ],
+    )
+    adapter = ZeroClawAdapter(runtime_config, executor)
+    task = Task(
+        id="zeroclaw.regression.timeout-recovery",
+        category="coding",
+        description="zeroclaw timeout recovery",
+        user_query="Reply with ZERO_OK.",
+        workspace_files=[{"path": "README.md", "content": "seed\n"}],
+        timeout_sec=30,
+    )
+    prepared = adapter.prepare(task, "zeroclaw-timeout-recovery")
+    config_dir = Path(prepared.env["_EVAL_CONFIG_DIR"])
+
+    monkeypatch.setattr(
+        "agent_harness_eval.adapters.zeroclaw._patch_zeroclaw_autonomy_config",
+        lambda config_dir_arg, workspace_dir_arg, **kwargs: (config_dir / "config.toml").write_text(
+            '[security]\nlevel = "full"\n', encoding="utf-8"
+        ),
+    )
+    monkeypatch.setattr(
+        "agent_harness_eval.adapters.zeroclaw._read_zeroclaw_runtime_trace",
+        lambda trace_path: {
+            "trace": [
+                CanonicalTraceEvent(type="tool_call_started", tool_name="read_file", ts="2026-01-01T00:00:00+00:00")
+            ],
+            "usage": {
+                "input": 11,
+                "output": 4,
+                "cache_read": 1,
+                "cache_write": 0,
+                "total_tokens": 16,
+                "tool_calls": 1,
+                "turns": 1,
+            },
+        },
+    )
+
+    try:
+        result = await adapter.run(prepared, "relay:claude-sonnet-4-6")
+
+        assert result.status == "timed_out"
+        assert result.final_text == "partial output"
+        assert len(result.trace) == 1
+        assert result.trace[0].type == "tool_call_started"
+        assert result.metrics.input_tokens == 11
+        assert result.metrics.output_tokens == 4
+        assert result.metrics.cache_read_tokens == 1
+        assert result.metrics.total_tokens == 16
+        assert result.metrics.tool_calls == 1
+        assert result.metrics.turns == 1
+    finally:
+        adapter.cleanup(prepared)
 
 
 def test_normalize_runtime_trace_ts_truncates_nanoseconds_to_milliseconds() -> None:
@@ -607,7 +683,101 @@ def test_read_zeroclaw_runtime_trace_handles_malformed_lines() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_read_zeroclaw_runtime_trace_honors_explicit_success_false() -> None:
+    """Regression: zeroclaw runtime_trace puts ``success`` at event top-level
+    (NOT payload — see zeroclaw src/observability/runtime_trace.rs:47 and
+    src/agent/loop_.rs:3187-3200). Pre-fix, the adapter hardcoded
+    ``success=True`` for every tool_call_result, silently masking every
+    real tool failure. After the fix, explicit ``success: false`` at top
+    level is reflected in the canonical trace.
+    """
+    root = Path(tempfile.mkdtemp(prefix="agent-harness-eval-test-"))
+    try:
+        trace_path = root / "runtime_trace.jsonl"
+        events = [
+            {
+                "event_type": "tool_call_start",
+                "timestamp": "2026-04-12T10:00:01Z",
+                "payload": {"tool": "exec", "arguments": '{"command": "false"}'},
+            },
+            {
+                "event_type": "tool_call_result",
+                "timestamp": "2026-04-12T10:00:02Z",
+                "success": False,
+                "message": "exit code 1",
+                "payload": {"tool": "exec", "output": "", "duration_ms": 42},
+            },
+        ]
+        trace_path.write_text("\n".join(json.dumps(e) for e in events) + "\n", encoding="utf-8")
+
+        result = _read_zeroclaw_runtime_trace(str(trace_path))
+        trace = result["trace"]
+
+        # Exactly 2 events, balanced start/completed; no orphan.
+        assert len(trace) == 2
+        assert trace[1].type == "tool_call_completed"
+        assert trace[1].success is False
+        # When payload.output is empty on failure, surface the top-level
+        # ``message`` (zeroclaw's error_reason) so graders see why it failed.
+        assert trace[1].output == "exit code 1"
+
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_read_zeroclaw_runtime_trace_defaults_success_to_true_when_absent() -> None:
+    """Back-compat: legacy/incomplete traces with no top-level ``success``
+    field (or success=null) should continue to be treated as successful —
+    matches pre-fix behavior for the common-case happy path.
+    """
+    root = Path(tempfile.mkdtemp(prefix="agent-harness-eval-test-"))
+    try:
+        trace_path = root / "runtime_trace.jsonl"
+        events = [
+            {
+                "event_type": "tool_call_start",
+                "timestamp": "2026-04-12T10:00:01Z",
+                "payload": {"tool": "read_file"},
+            },
+            {
+                "event_type": "tool_call_result",
+                "timestamp": "2026-04-12T10:00:02Z",
+                # No "success" field at all — legacy shape
+                "payload": {"tool": "read_file", "output": "file contents here"},
+            },
+            {
+                "event_type": "tool_call_start",
+                "timestamp": "2026-04-12T10:00:03Z",
+                "payload": {"tool": "read_file"},
+            },
+            {
+                "event_type": "tool_call_result",
+                "timestamp": "2026-04-12T10:00:04Z",
+                # Explicit None — should also default to True
+                "success": None,
+                "payload": {"tool": "read_file", "output": "more contents"},
+            },
+        ]
+        trace_path.write_text("\n".join(json.dumps(e) for e in events) + "\n", encoding="utf-8")
+
+        result = _read_zeroclaw_runtime_trace(str(trace_path))
+        completed = [e for e in result["trace"] if e.type == "tool_call_completed"]
+        assert len(completed) == 2
+        assert all(e.success is True for e in completed)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def test_read_zeroclaw_runtime_trace_pending_tools_closed() -> None:
+    """Regression: a tool_call_start without a matching tool_call_result
+    (agent crashed mid-tool / stream truncated) must emit a synthetic
+    ``tool_call_completed(success=False)`` at the trace tail. Pre-fix, the
+    pending_tools tracker was a dict[str, str] that was never populated, so
+    the orphan-close loop silently no-op'd and left unpaired ``started``
+    events at the tail. That made zeroclaw the only adapter where a mid-tool
+    crash could leave the trace structurally unbalanced, and it violated
+    the invariant every other adapter (claude_code, openclaw) holds.
+    """
     root = Path(tempfile.mkdtemp(prefix="agent-harness-eval-test-"))
     try:
         trace_path = root / "runtime_trace.jsonl"
@@ -622,8 +792,12 @@ def test_read_zeroclaw_runtime_trace_pending_tools_closed() -> None:
 
         result = _read_zeroclaw_runtime_trace(str(trace_path))
         trace = result["trace"]
-        assert len(trace) == 1
+        assert len(trace) == 2, f"expected tool_call_started + synthetic orphan closure, got {len(trace)}"
         assert trace[0].type == "tool_call_started"
         assert trace[0].tool_name == "exec"
+        assert trace[1].type == "tool_call_completed"
+        assert trace[1].tool_name == "exec"
+        assert trace[1].success is False
+        assert trace[1].output == "<no result recorded>"
     finally:
         shutil.rmtree(root, ignore_errors=True)
