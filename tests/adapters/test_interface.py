@@ -331,6 +331,28 @@ def test_empty_output_guard_keeps_explicit_task_failure() -> None:
     assert failure is None
 
 
+def test_empty_output_guard_lets_run_with_tool_completed_pass() -> None:
+    """P2 review finding: openclaw's session parser can emit standalone
+    ``tool_call_completed`` events without a matching ``tool_call_started``
+    (e.g. when only the toolResult line was captured). A ``tool_call_completed``
+    is still evidence the agent did real work — must not be classified as
+    adapter_empty_output."""
+    failure = detect_empty_output_silent_failure(
+        trace=[
+            CanonicalTraceEvent(
+                type="tool_call_completed",
+                tool_name="read_file",
+                success=True,
+                output="file contents",
+                ts="2026-01-01T00:00:00.000+00:00",
+            )
+        ],
+        final_text="",
+        command_label="OpenClaw",
+    )
+    assert failure is None
+
+
 def test_empty_output_guard_includes_stderr_tail_when_provided() -> None:
     """Stderr context is useful for post-mortem — include it in the error."""
     failure = detect_empty_output_silent_failure(

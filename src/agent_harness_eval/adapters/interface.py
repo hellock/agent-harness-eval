@@ -110,7 +110,9 @@ def detect_empty_output_silent_failure(
     call, or non-empty final_text), otherwise a ``SubprocessFailure`` that
     the caller can wrap into the RunResult's failure fields.
     """
-    has_content = any(event.type in ("message", "tool_call_started", "task_failed") for event in trace)
+    has_content = any(
+        event.type in ("message", "tool_call_started", "tool_call_completed", "task_failed") for event in trace
+    )
     if final_text or has_content:
         return None
 

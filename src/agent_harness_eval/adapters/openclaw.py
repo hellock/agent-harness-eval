@@ -240,90 +240,79 @@ class OpenClawAdapter(HarnessAdapter):
                 infra_error_code=subprocess_failure.infra_error_code,
             )
 
-        session_data = _read_openclaw_session_with_usage(state_dir, agent_id, session_id)
-        session_trace = session_data["trace"]
-        session_final_text = _extract_openclaw_final_text(session_trace)
-        if session_final_text:
-            if not any(event.type == "task_completed" for event in session_trace):
-                session_trace.append(
-                    CanonicalTraceEvent(
-                        type="task_completed",
-                        ts=task_completion_ts(session_trace),
-                    )
-                )
-            usage = session_data["usage"]
-            input_tokens = usage["input"]
-            output_tokens = usage["output"]
-            cache_read_tokens = usage["cache_read"]
-            cache_write_tokens = usage["cache_write"]
-            total_tokens = usage["total"] or (input_tokens + output_tokens + cache_read_tokens + cache_write_tokens)
-            tool_calls = session_data["tool_calls"]
-            turns = usage["turns"] or max(1, len([e for e in session_trace if e.type == "message"]))
-            return self._make_result(
-                task,
-                model,
-                "completed",
-                session_final_text,
-                session_trace,
-                RunMetrics(
-                    latency_sec=latency_sec,
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens,
-                    cache_read_tokens=cache_read_tokens,
-                    cache_write_tokens=cache_write_tokens,
-                    total_tokens=total_tokens,
-                    cost_usd=calculate_cost(
-                        model,
-                        input_tokens,
-                        output_tokens,
-                        cache_read_tokens,
-                        cache_write_tokens,
-                        pricing=self.pricing_override(),
-                    ),
-                    tool_calls=tool_calls,
-                    turns=turns,
-                ),
-            )
-
+        # --- Unified completed path ---
+        # Previously split across two branches (session-first and
+        # stdout-JSON-fallback), now merged into one flow with a clear
+        # priority: session trace > stdout JSON payloads > raw stdout.
+        # _read_openclaw_session_content already falls back to the most-
+        # recent .jsonl if the prepared session_id.jsonl doesn't exist, so
+        # we always try the prepared session_id first.
         try:
-            try:
-                json_str = _extract_json_from_output(result.stdout)
-            except ValueError:
-                json_str = _extract_json_from_output(result.stderr)
-
-            output = json.loads(json_str)
-            payloads = output.get("payloads", [])
-            meta = output.get("meta", {})
-            agent_meta = meta.get("agentMeta", {})
-
-            final_text = "\n".join(filter(None, (p.get("text") or p.get("body", "") for p in payloads)))
-
-            cumulative_usage = agent_meta.get("usage", {})
-            last_usage = agent_meta.get("lastCallUsage", {})
-            last_call_tokens = last_usage.get("total") or last_usage.get("input", 0)
-            cumulative_total = cumulative_usage.get("input", 0) + cumulative_usage.get("output", 0)
-            estimated_turns = max(1, round(cumulative_total / last_call_tokens)) if last_call_tokens > 0 else 1
-            estimated_tool_calls = max(0, estimated_turns - 1)
-
-            session_id_from_meta = agent_meta.get("sessionId")
-            session_data = (
-                _read_openclaw_session_with_usage(state_dir, agent_id, session_id_from_meta)
-                if session_id_from_meta
-                else {
-                    "trace": [],
-                    "usage": {
-                        "input": 0,
-                        "output": 0,
-                        "cache_read": 0,
-                        "cache_write": 0,
-                        "total": 0,
-                        "turns": 0,
-                    },
-                    "tool_calls": 0,
-                }
-            )
-
+            # 1. Session data is the primary (authoritative) source.
+            session_data = _read_openclaw_session_with_usage(state_dir, agent_id, session_id)
             trace = session_data["trace"]
+            usage = session_data["usage"]
+
+            # 2. final_text: session trace first.
+            final_text = _extract_openclaw_final_text(trace)
+
+            # 3. Stdout JSON: secondary source for final_text and metric
+            #    estimates when session data is incomplete.
+            estimated_turns = 1
+            estimated_tool_calls = 0
+            try:
+                try:
+                    json_str = _extract_json_from_output(result.stdout)
+                except ValueError:
+                    json_str = _extract_json_from_output(result.stderr)
+
+                output_obj = json.loads(json_str)
+                payloads = output_obj.get("payloads", [])
+                meta = output_obj.get("meta", {})
+                agent_meta = meta.get("agentMeta", {})
+
+                if not final_text:
+                    final_text = "\n".join(filter(None, (p.get("text") or p.get("body", "") for p in payloads)))
+
+                # Estimated metrics from stdout JSON (used when session
+                # usage is all-zero — happens when openclaw writes the
+                # session log but not per-message usage).
+                cumulative_usage = agent_meta.get("usage", {})
+                last_usage = agent_meta.get("lastCallUsage", {})
+                last_call_tokens = last_usage.get("total") or last_usage.get("input", 0)
+                cumulative_total = cumulative_usage.get("input", 0) + cumulative_usage.get("output", 0)
+                estimated_turns = max(1, round(cumulative_total / last_call_tokens)) if last_call_tokens > 0 else 1
+                estimated_tool_calls = max(0, estimated_turns - 1)
+
+                # If initial session read was empty, retry with the
+                # session ID openclaw actually used (agentMeta.sessionId
+                # may differ from the one we passed).
+                if not trace:
+                    session_id_from_meta = agent_meta.get("sessionId")
+                    if session_id_from_meta and session_id_from_meta != session_id:
+                        session_data = _read_openclaw_session_with_usage(state_dir, agent_id, session_id_from_meta)
+                        trace = session_data["trace"]
+                        usage = session_data["usage"]
+                        if not final_text:
+                            final_text = _extract_openclaw_final_text(trace)
+
+                # Fill session-level gaps from stdout JSON estimates.
+                if not usage["input"]:
+                    usage["input"] = cumulative_usage.get("input") or last_usage.get("input", 0)
+                    usage["output"] = cumulative_usage.get("output") or last_usage.get("output", 0)
+                    usage["cache_read"] = cumulative_usage.get("cacheRead") or last_usage.get("cacheRead", 0)
+                    usage["cache_write"] = cumulative_usage.get("cacheWrite") or last_usage.get("cacheWrite", 0)
+                    usage["total"] = usage["input"] + usage["output"] + usage["cache_read"] + usage["cache_write"]
+            except (ValueError, json.JSONDecodeError):
+                # stdout JSON unavailable — session data is all we have.
+                # Do NOT fall back to raw stdout as final_text: the old
+                # code never used raw stdout in the completed path, only
+                # in the failed path (for post-mortem). Treating banner/log
+                # noise as a real answer would turn a silent adapter failure
+                # into a fake completion (P1 review finding).
+                pass
+
+            # 5. Inject final_text as a message event when trace is empty.
             if final_text and not trace:
                 trace.append(
                     CanonicalTraceEvent(
@@ -333,35 +322,8 @@ class OpenClawAdapter(HarnessAdapter):
                         ts=to_canonical_ts(),
                     )
                 )
-            trace.append(
-                CanonicalTraceEvent(
-                    type="task_completed",
-                    ts=task_completion_ts(trace),
-                )
-            )
 
-            usage = session_data["usage"]
-            input_tokens = usage["input"] or cumulative_usage.get("input") or last_usage.get("input", 0)
-            output_tokens = usage["output"] or cumulative_usage.get("output") or last_usage.get("output", 0)
-            cache_read_tokens = (
-                usage["cache_read"] or cumulative_usage.get("cacheRead") or last_usage.get("cacheRead", 0)
-            )
-            cache_write_tokens = (
-                usage["cache_write"] or cumulative_usage.get("cacheWrite") or last_usage.get("cacheWrite", 0)
-            )
-            total_tokens = usage["total"] or (input_tokens + output_tokens + cache_read_tokens + cache_write_tokens)
-
-            trace_tool_calls = session_data["tool_calls"]
-            tool_calls = trace_tool_calls if trace_tool_calls > 0 else estimated_tool_calls
-            turns = usage["turns"] if usage["turns"] > 0 else estimated_turns
-
-            # Guard against silent failures via the shared helper — same
-            # check now runs across every adapter with exit-0-plus-empty-output
-            # risk (codex, hermes, zeroclaw have similar exposure).
-            # OpenClaw's original trigger: stdout JSON structurally valid but
-            # ``payloads=[]`` AND session log never written (no sessionId in
-            # agentMeta) → final_text empty, trace only has synthetic
-            # task_completed, all token/tool metrics zero.
+            # 6. Empty-output guard (shared across all adapters).
             empty_failure = detect_empty_output_silent_failure(
                 trace, final_text, command_label="OpenClaw", stderr=result.stderr or ""
             )
@@ -382,6 +344,24 @@ class OpenClawAdapter(HarnessAdapter):
                     failure_origin=empty_failure.failure_origin,
                     infra_error_code=empty_failure.infra_error_code,
                 )
+
+            # 7. Append task_completed if not already present.
+            if not any(event.type == "task_completed" for event in trace):
+                trace.append(
+                    CanonicalTraceEvent(
+                        type="task_completed",
+                        ts=task_completion_ts(trace),
+                    )
+                )
+
+            # 8. Metrics: session-level preferred, estimated as fallback.
+            input_tokens = usage["input"]
+            output_tokens = usage["output"]
+            cache_read_tokens = usage["cache_read"]
+            cache_write_tokens = usage["cache_write"]
+            total_tokens = usage["total"] or (input_tokens + output_tokens + cache_read_tokens + cache_write_tokens)
+            tool_calls = session_data["tool_calls"] or estimated_tool_calls
+            turns = usage["turns"] or estimated_turns
 
             return self._make_result(
                 task,
