@@ -28,6 +28,7 @@ from .interface import (
     HarnessAdapter,
     NativeMemoryFile,
     PreparedRun,
+    detect_empty_output_silent_failure,
     detect_subprocess_failure,
 )
 
@@ -201,8 +202,8 @@ class OpenClawAdapter(HarnessAdapter):
                     )
                 )
             usage = session_data["usage"]
-            tool_calls = len([e for e in trace if e.type == "tool_call_started"])
-            turns = usage["calls"] or len([e for e in trace if e.type == "message"])
+            tool_calls = session_data["tool_calls"]
+            turns = usage["turns"] or len([e for e in trace if e.type == "message"])
             return self._make_result(
                 task,
                 model,
@@ -215,7 +216,7 @@ class OpenClawAdapter(HarnessAdapter):
                     output_tokens=usage["output"],
                     cache_read_tokens=usage["cache_read"],
                     cache_write_tokens=usage["cache_write"],
-                    total_tokens=usage["total_tokens"],
+                    total_tokens=usage["total"],
                     tool_calls=tool_calls,
                     turns=turns,
                 ),
@@ -255,11 +256,9 @@ class OpenClawAdapter(HarnessAdapter):
             output_tokens = usage["output"]
             cache_read_tokens = usage["cache_read"]
             cache_write_tokens = usage["cache_write"]
-            total_tokens = usage["total_tokens"] or (
-                input_tokens + output_tokens + cache_read_tokens + cache_write_tokens
-            )
-            tool_calls = len([e for e in session_trace if e.type == "tool_call_started"])
-            turns = usage["calls"] or max(1, len([e for e in session_trace if e.type == "message"]))
+            total_tokens = usage["total"] or (input_tokens + output_tokens + cache_read_tokens + cache_write_tokens)
+            tool_calls = session_data["tool_calls"]
+            turns = usage["turns"] or max(1, len([e for e in session_trace if e.type == "message"]))
             return self._make_result(
                 task,
                 model,
@@ -317,9 +316,10 @@ class OpenClawAdapter(HarnessAdapter):
                         "output": 0,
                         "cache_read": 0,
                         "cache_write": 0,
-                        "total_tokens": 0,
-                        "calls": 0,
+                        "total": 0,
+                        "turns": 0,
                     },
+                    "tool_calls": 0,
                 }
             )
 
@@ -349,30 +349,23 @@ class OpenClawAdapter(HarnessAdapter):
             cache_write_tokens = (
                 usage["cache_write"] or cumulative_usage.get("cacheWrite") or last_usage.get("cacheWrite", 0)
             )
-            total_tokens = usage["total_tokens"] or (
-                input_tokens + output_tokens + cache_read_tokens + cache_write_tokens
-            )
+            total_tokens = usage["total"] or (input_tokens + output_tokens + cache_read_tokens + cache_write_tokens)
 
-            trace_tool_calls = len([e for e in trace if e.type == "tool_call_started"])
+            trace_tool_calls = session_data["tool_calls"]
             tool_calls = trace_tool_calls if trace_tool_calls > 0 else estimated_tool_calls
-            turns = usage["calls"] if usage["calls"] > 0 else estimated_turns
+            turns = usage["turns"] if usage["turns"] > 0 else estimated_turns
 
-            # Guard against silent failures: subprocess exits 0 but produces nothing.
-            # Seen when stdout JSON is structurally valid but ``payloads=[]`` AND the
-            # session log was never written (no sessionId in agentMeta). In that
-            # scenario ``final_text`` is empty, ``trace`` holds only the synthetic
-            # ``task_completed`` event we just appended, and all token/tool metrics
-            # are zero. Classifying this as "completed" pollutes pass-rate stats —
-            # the run really failed; grader results just happen to also be zero.
-            has_content = any(event.type in ("message", "tool_call_started") for event in trace)
-            if not final_text and not has_content:
-                error = (
-                    "OpenClaw produced no output: subprocess exited cleanly but "
-                    "stdout payloads were empty and no session log was written"
-                )
-                stderr_tail = (result.stderr or "")[:STDERR_PREVIEW_MAX_CHARS]
-                if stderr_tail:
-                    error += f"\nstderr: {stderr_tail}"
+            # Guard against silent failures via the shared helper — same
+            # check now runs across every adapter with exit-0-plus-empty-output
+            # risk (codex, hermes, zeroclaw have similar exposure).
+            # OpenClaw's original trigger: stdout JSON structurally valid but
+            # ``payloads=[]`` AND session log never written (no sessionId in
+            # agentMeta) → final_text empty, trace only has synthetic
+            # task_completed, all token/tool metrics zero.
+            empty_failure = detect_empty_output_silent_failure(
+                trace, final_text, command_label="OpenClaw", stderr=result.stderr or ""
+            )
+            if empty_failure is not None:
                 return self._make_result(
                     task,
                     model,
@@ -381,13 +374,13 @@ class OpenClawAdapter(HarnessAdapter):
                     [
                         CanonicalTraceEvent(
                             type="task_failed",
-                            error=error[:800],
+                            error=empty_failure.error,
                             ts=to_canonical_ts(),
                         )
                     ],
                     RunMetrics(latency_sec=latency_sec),
-                    failure_origin="adapter",
-                    infra_error_code="adapter_empty_output",
+                    failure_origin=empty_failure.failure_origin,
+                    infra_error_code=empty_failure.infra_error_code,
                 )
 
             return self._make_result(
@@ -876,21 +869,25 @@ def _looks_like_tool_failure(text: str) -> bool:
 
 
 def _read_openclaw_session_with_usage(state_dir: str, agent_id: str, session_id: str) -> dict[str, Any]:
+    # Canonical parser-output shape (see codex/zeroclaw/hermes/nanobot):
+    # ``total`` (not ``total_tokens``), ``turns`` (not ``calls``), and
+    # ``tool_calls`` returned top-level alongside usage.
     trace: list[CanonicalTraceEvent] = []
     usage = {
         "input": 0,
         "output": 0,
         "cache_read": 0,
         "cache_write": 0,
-        "total_tokens": 0,
-        "calls": 0,
+        "total": 0,
+        "turns": 0,
     }
+    tool_calls_count = 0
     try:
         session_dir = os.path.join(state_dir, "agents", agent_id, "sessions")
         session_path = os.path.join(session_dir, f"{session_id}.jsonl")
         content = _read_openclaw_session_content(session_dir, session_path)
         if not content:
-            return {"trace": trace, "usage": usage}
+            return {"trace": trace, "usage": usage, "tool_calls": tool_calls_count}
 
         pending_tools: list[dict[str, str]] = []
 
@@ -912,8 +909,8 @@ def _read_openclaw_session_with_usage(state_dir: str, agent_id: str, session_id:
                 usage["output"] += int(u.get("output", 0))
                 usage["cache_read"] += int(u.get("cacheRead", 0))
                 usage["cache_write"] += int(u.get("cacheWrite", 0))
-                usage["total_tokens"] += int(u.get("totalTokens", 0))
-                usage["calls"] += 1
+                usage["total"] += int(u.get("totalTokens", 0))
+                usage["turns"] += 1
 
             if not isinstance(content_blocks, list):
                 continue
@@ -992,7 +989,8 @@ def _read_openclaw_session_with_usage(state_dir: str, agent_id: str, session_id:
     except Exception:
         pass
 
-    return {"trace": trace, "usage": usage}
+    tool_calls_count = sum(1 for e in trace if e.type == "tool_call_started")
+    return {"trace": trace, "usage": usage, "tool_calls": tool_calls_count}
 
 
 def _extract_openclaw_final_text(trace: list[CanonicalTraceEvent]) -> str:

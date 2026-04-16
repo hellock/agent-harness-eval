@@ -337,10 +337,10 @@ class NanobotAdapter(HarnessAdapter):
                 "output": 0,
                 "cache_read": 0,
                 "cache_write": 0,
-                "total_tokens": 0,
-                "tool_calls": 0,
+                "total": 0,
                 "turns": 0,
             }
+            tool_calls_count = 0
             # Narrow exception list: we know the realistic failure modes for
             # reading a JSONL file (missing/unreadable file, malformed line).
             # Anything outside this set is a bug we want surfaced, not swallowed.
@@ -349,6 +349,7 @@ class NanobotAdapter(HarnessAdapter):
                 session_data = _read_nanobot_session(runtime_dir, session_id)
                 trace = session_data["trace"]
                 usage = session_data["usage"]
+                tool_calls_count = session_data["tool_calls"]
                 if not final_text:
                     final_text = _extract_nanobot_final_text(trace)
             except (OSError, ValueError, json.JSONDecodeError) as exc:
@@ -366,7 +367,7 @@ class NanobotAdapter(HarnessAdapter):
                     output_tokens=usage["output"],
                     cache_read_tokens=usage["cache_read"],
                     cache_write_tokens=usage["cache_write"],
-                    total_tokens=usage["total_tokens"],
+                    total_tokens=usage["total"],
                     cost_usd=calculate_cost(
                         model,
                         usage["input"],
@@ -375,7 +376,7 @@ class NanobotAdapter(HarnessAdapter):
                         usage["cache_write"],
                         pricing=self.pricing_override(),
                     ),
-                    tool_calls=usage["tool_calls"],
+                    tool_calls=tool_calls_count,
                     turns=usage["turns"],
                 ),
             )
@@ -441,7 +442,7 @@ class NanobotAdapter(HarnessAdapter):
                     output_tokens=usage["output"],
                     cache_read_tokens=usage["cache_read"],
                     cache_write_tokens=usage["cache_write"],
-                    total_tokens=usage["total_tokens"],
+                    total_tokens=usage["total"],
                     cost_usd=calculate_cost(
                         model,
                         usage["input"],
@@ -450,7 +451,7 @@ class NanobotAdapter(HarnessAdapter):
                         usage["cache_write"],
                         pricing=self.pricing_override(),
                     ),
-                    tool_calls=usage["tool_calls"],
+                    tool_calls=session_data["tool_calls"],
                     turns=usage["turns"],
                 ),
             )
@@ -650,6 +651,9 @@ def _normalize_session_ts(raw: Any) -> str:
 
 
 def _read_nanobot_session(runtime_dir: str, session_id: str) -> dict[str, Any]:
+    # Canonical parser-output shape (see codex/zeroclaw/hermes): ``total``
+    # (not ``total_tokens``); ``tool_calls`` returned top-level alongside
+    # usage. Keeps the field set uniform across every adapter parser.
     session_path = Path(runtime_dir) / "sessions" / f"{session_id}.jsonl"
     trace: list[CanonicalTraceEvent] = []
     usage = {
@@ -657,12 +661,12 @@ def _read_nanobot_session(runtime_dir: str, session_id: str) -> dict[str, Any]:
         "output": 0,
         "cache_read": 0,
         "cache_write": 0,
-        "total_tokens": 0,
-        "tool_calls": 0,
+        "total": 0,
         "turns": 0,
     }
+    tool_calls_count = 0
     if not session_path.exists():
-        return {"trace": trace, "usage": usage}
+        return {"trace": trace, "usage": usage, "tool_calls": tool_calls_count}
 
     pending_tools: dict[str, str] = {}
     with open(session_path, encoding="utf-8") as f:
@@ -678,7 +682,7 @@ def _read_nanobot_session(runtime_dir: str, session_id: str) -> dict[str, Any]:
                 usage["output"] = int(last_usage.get("completion_tokens", 0))
                 usage["cache_read"] = int(last_usage.get("cache_read_input_tokens", last_usage.get("cached_tokens", 0)))
                 usage["cache_write"] = int(last_usage.get("cache_creation_input_tokens", 0))
-                usage["total_tokens"] = int(last_usage.get("total_tokens", 0))
+                usage["total"] = int(last_usage.get("total_tokens", 0))
                 continue
 
             role = event.get("role")
@@ -731,7 +735,7 @@ def _read_nanobot_session(runtime_dir: str, session_id: str) -> dict[str, Any]:
                                 ts=ts,
                             )
                         )
-                        usage["tool_calls"] += 1
+                        tool_calls_count += 1
                         if isinstance(tool_id, str):
                             pending_tools[tool_id] = tool_name
                     continue
@@ -770,7 +774,7 @@ def _read_nanobot_session(runtime_dir: str, session_id: str) -> dict[str, Any]:
             )
         )
 
-    return {"trace": trace, "usage": usage}
+    return {"trace": trace, "usage": usage, "tool_calls": tool_calls_count}
 
 
 def _extract_nanobot_final_text(trace: list[CanonicalTraceEvent]) -> str:

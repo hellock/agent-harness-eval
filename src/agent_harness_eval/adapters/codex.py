@@ -24,6 +24,7 @@ from . import register_adapter
 from .interface import (
     HarnessAdapter,
     PreparedRun,
+    detect_empty_output_silent_failure,
     detect_subprocess_failure,
 )
 
@@ -188,6 +189,31 @@ class CodexAdapter(HarnessAdapter):
             final_text = parsed["final_text"]
             trace = parsed["trace"]
             usage = parsed["usage"]
+
+            # Silent-failure guard: exit 0 + empty parser output = failure,
+            # not completion. Runs into codex specifically when the session
+            # ends immediately (e.g. API key invalid returning a null stream)
+            # and the JSONL has no ``agent_message`` item.
+            empty_failure = detect_empty_output_silent_failure(
+                trace, final_text, command_label="Codex", stderr=result.stderr or ""
+            )
+            if empty_failure is not None:
+                return self._make_result(
+                    task,
+                    model,
+                    "failed",
+                    result.stdout or "",
+                    [
+                        CanonicalTraceEvent(
+                            type="task_failed",
+                            error=empty_failure.error,
+                            ts=to_canonical_ts(),
+                        )
+                    ],
+                    RunMetrics(latency_sec=latency_sec),
+                    failure_origin=empty_failure.failure_origin,
+                    infra_error_code=empty_failure.infra_error_code,
+                )
 
             trace.append(
                 CanonicalTraceEvent(

@@ -29,6 +29,7 @@ from .interface import (
     HarnessAdapter,
     NativeMemoryFile,
     PreparedRun,
+    detect_empty_output_silent_failure,
 )
 
 
@@ -146,6 +147,31 @@ class HermesAdapter(HarnessAdapter):
                         ts=to_canonical_ts(),
                     )
                 )
+
+            # Silent-failure guard: exit 0 + empty session + empty final_text
+            # = failure, not completion. Happens when state.db is empty
+            # (hermes init failed silently) or the session wasn't flushed.
+            empty_failure = detect_empty_output_silent_failure(
+                trace, final_text, command_label="Hermes", stderr=result.stderr or ""
+            )
+            if empty_failure is not None:
+                return self._make_result(
+                    task,
+                    model,
+                    "failed",
+                    result.stdout or "",
+                    [
+                        CanonicalTraceEvent(
+                            type="task_failed",
+                            error=empty_failure.error,
+                            ts=to_canonical_ts(),
+                        )
+                    ],
+                    RunMetrics(latency_sec=latency_sec),
+                    failure_origin=empty_failure.failure_origin,
+                    infra_error_code=empty_failure.infra_error_code,
+                )
+
             trace.append(
                 CanonicalTraceEvent(
                     type="task_completed",
@@ -165,7 +191,7 @@ class HermesAdapter(HarnessAdapter):
                     output_tokens=usage["output"],
                     cache_read_tokens=usage["cache_read"],
                     cache_write_tokens=usage["cache_write"],
-                    total_tokens=usage["total_tokens"],
+                    total_tokens=usage["total"],
                     cost_usd=calculate_cost(
                         model,
                         usage["input"],
@@ -174,7 +200,7 @@ class HermesAdapter(HarnessAdapter):
                         usage["cache_write"],
                         pricing=self.pricing_override(),
                     ),
-                    tool_calls=usage["tool_calls"],
+                    tool_calls=session_data["tool_calls"],
                     turns=usage["turns"],
                 ),
             )
@@ -286,20 +312,27 @@ def _read_hermes_session(
     Returns a dict with ``trace`` (list of CanonicalTraceEvent) and
     ``usage`` (dict of token counts and tool_calls).
     """
+    # Canonical parser-output shape (see codex/zeroclaw): ``total`` (not
+    # ``total_tokens``); ``tool_calls`` returned top-level alongside usage.
     trace: list[CanonicalTraceEvent] = []
     usage = {
         "input": 0,
         "output": 0,
         "cache_read": 0,
         "cache_write": 0,
-        "total_tokens": 0,
-        "tool_calls": 0,
+        "total": 0,
         "turns": 0,
     }
+    # Outer ``tool_calls_count`` avoids a name collision with the
+    # inner-loop local ``tool_calls`` (per-message JSON list). Before this
+    # rename the session-level count was silently clobbered by the last
+    # message row's per-row list, making the final return's ``tool_calls``
+    # field sometimes a ``list`` and sometimes ``None``.
+    tool_calls_count = 0
 
     db_path = os.path.join(runtime_dir, "state.db")
     if not os.path.exists(db_path):
-        return {"trace": trace, "usage": usage}
+        return {"trace": trace, "usage": usage, "tool_calls": tool_calls_count}
 
     conn = sqlite3.connect(db_path, timeout=5.0)
     conn.row_factory = sqlite3.Row
@@ -308,7 +341,7 @@ def _read_hermes_session(
         if not session_id:
             row = conn.execute("SELECT id FROM sessions ORDER BY started_at DESC LIMIT 1").fetchone()
             if not row:
-                return {"trace": trace, "usage": usage}
+                return {"trace": trace, "usage": usage, "tool_calls": tool_calls_count}
             session_id = row["id"]
 
         # --- Session-level token counts ---
@@ -319,8 +352,8 @@ def _read_hermes_session(
             usage["output"] = int(session.get("output_tokens") or 0)
             usage["cache_read"] = int(session.get("cache_read_tokens") or 0)
             usage["cache_write"] = int(session.get("cache_write_tokens") or 0)
-            usage["total_tokens"] = usage["input"] + usage["output"]
-            usage["tool_calls"] = int(session.get("tool_call_count") or 0)
+            usage["total"] = usage["input"] + usage["output"]
+            tool_calls_count = int(session.get("tool_call_count") or 0)
 
         # --- Messages → trace events ---
         rows = conn.execute(
@@ -436,4 +469,4 @@ def _read_hermes_session(
     finally:
         conn.close()
 
-    return {"trace": trace, "usage": usage}
+    return {"trace": trace, "usage": usage, "tool_calls": tool_calls_count}

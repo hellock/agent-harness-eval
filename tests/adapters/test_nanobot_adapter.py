@@ -259,15 +259,16 @@ def test_read_nanobot_session_extracts_trace_and_usage(
     assert session_data["trace"][2].tool_name == "read_file"
     assert session_data["trace"][2].input == {"path": "/tmp/PRECHECK.md"}
     assert session_data["trace"][3].success is True
+    # Canonical shape: ``total`` in usage; ``tool_calls`` top-level.
     assert session_data["usage"] == {
         "input": 10,
         "output": 4,
         "cache_read": 3,
         "cache_write": 2,
-        "total_tokens": 19,
-        "tool_calls": 1,
+        "total": 19,
         "turns": 2,
     }
+    assert session_data["tool_calls"] == 1
 
 
 def test_prime_nanobot_workspace_creates_required_templates(
@@ -362,10 +363,10 @@ async def test_nanobot_run_builds_wrapper_runtime_config_and_workspace_contract(
                 "output": 3,
                 "cache_read": 1,
                 "cache_write": 0,
-                "total_tokens": 13,
-                "tool_calls": 0,
+                "total": 13,
                 "turns": 1,
             },
+            "tool_calls": 0,
         },
     )
 
@@ -626,10 +627,10 @@ async def test_nanobot_run_recovers_trace_and_usage_on_timeout(
                 "output": 7,
                 "cache_read": 2,
                 "cache_write": 1,
-                "total_tokens": 25,
-                "tool_calls": 3,
+                "total": 25,
                 "turns": 2,
             },
+            "tool_calls": 3,
         },
     )
 

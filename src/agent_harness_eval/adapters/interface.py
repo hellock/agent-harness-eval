@@ -84,6 +84,49 @@ def detect_subprocess_failure(
     )
 
 
+def detect_empty_output_silent_failure(
+    trace: list[CanonicalTraceEvent],
+    final_text: str,
+    *,
+    command_label: str,
+    stderr: str = "",
+) -> SubprocessFailure | None:
+    """Detect "subprocess exited cleanly but produced nothing" silent failures.
+
+    A run that returns with ``exit_code == 0`` but emits no real events and
+    no final_text should be classified as ``failed(adapter_empty_output)``,
+    not ``completed``. Without this guard, such runs end up in pass-rate
+    statistics as legitimate completions with all-zero metrics — polluting
+    every aggregate that keys off ``status == "completed"``.
+
+    Originally added only to openclaw (where it was repeatedly observed in
+    the v1 rerun), the same failure mode applies to any harness that reads
+    events from stdout / side files: if the parser finishes with nothing
+    meaningful, it's a silent failure regardless of harness. Callers should
+    invoke this after the parser has finished running, before returning the
+    "completed" RunResult.
+
+    Returns ``None`` if the run has real content (a message event, a tool
+    call, or non-empty final_text), otherwise a ``SubprocessFailure`` that
+    the caller can wrap into the RunResult's failure fields.
+    """
+    has_content = any(event.type in ("message", "tool_call_started", "task_failed") for event in trace)
+    if final_text or has_content:
+        return None
+
+    error = (
+        f"{command_label} produced no output: subprocess exited cleanly but no message / tool_call events were emitted"
+    )
+    stderr_tail = (stderr or "")[:STDERR_PREVIEW_MAX_CHARS]
+    if stderr_tail:
+        error += f"\nstderr: {stderr_tail}"
+    return SubprocessFailure(
+        error=error[:800],
+        failure_origin="adapter",
+        infra_error_code="adapter_empty_output",
+    )
+
+
 def _harness_config_key(harness_name: str) -> str:
     """Map CLI harness name to YAML config key (e.g. 'claude-code' → 'claude_code')."""
     return harness_name.replace("-", "_")

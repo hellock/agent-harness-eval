@@ -77,10 +77,10 @@ async def test_zeroclaw_run_uses_onboard_then_agent_in_authoritative_workspace(
                 "output": 4,
                 "cache_read": 0,
                 "cache_write": 0,
-                "total_tokens": 15,
-                "tool_calls": 1,
+                "total": 15,
                 "turns": 1,
             },
+            "tool_calls": 1,
         },
     )
     monkeypatch.setattr(
@@ -231,10 +231,10 @@ async def test_zeroclaw_run_uses_custom_provider_for_openai_compatible_relays(
                 "output": 3,
                 "cache_read": 0,
                 "cache_write": 0,
-                "total_tokens": 10,
-                "tool_calls": 0,
+                "total": 10,
                 "turns": 1,
             },
+            "tool_calls": 0,
         },
     )
     monkeypatch.setattr(
@@ -456,10 +456,10 @@ async def test_zeroclaw_run_recovers_trace_and_usage_on_timeout(
                 "output": 4,
                 "cache_read": 1,
                 "cache_write": 0,
-                "total_tokens": 16,
-                "tool_calls": 1,
+                "total": 16,
                 "turns": 1,
             },
+            "tool_calls": 1,
         },
     )
 
@@ -531,7 +531,7 @@ def test_read_zeroclaw_runtime_trace_missing_file() -> None:
     assert result["trace"] == []
     assert result["usage"]["input"] == 0
     assert result["usage"]["output"] == 0
-    assert result["usage"]["tool_calls"] == 0
+    assert result["tool_calls"] == 0
     assert result["usage"]["turns"] == 0
 
 
@@ -589,6 +589,8 @@ def test_read_zeroclaw_runtime_trace_parses_events() -> None:
         usage = result["usage"]
         trace = result["trace"]
 
+        # Canonical shape: ``total`` (not ``total_tokens``), ``tool_calls``
+        # top-level alongside usage.
         assert usage["input"] == 1300
         assert usage["output"] == 600
         assert usage["cache_read"] == 50
@@ -597,8 +599,8 @@ def test_read_zeroclaw_runtime_trace_parses_events() -> None:
         assert usage["cache_write"] == 0
         # total = input (1300) + output (600) + cache_read (50) = 1950.
         # cache_write is not added because zeroclaw does not expose it.
-        assert usage["total_tokens"] == 1950
-        assert usage["tool_calls"] == 2
+        assert usage["total"] == 1950
+        assert result["tool_calls"] == 2
         assert usage["turns"] == 2
 
         assert [e.type for e in trace] == [

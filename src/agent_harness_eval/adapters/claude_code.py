@@ -174,9 +174,9 @@ class ClaudeCodeAdapter(HarnessAdapter):
             output_tokens = usage["output"]
             cache_read_tokens = usage["cache_read"]
             cache_write_tokens = usage["cache_write"]
-            total_tokens = input_tokens + output_tokens + cache_read_tokens + cache_write_tokens
+            total_tokens = usage["total"]
             tool_calls = len([e for e in trace if e.type == "tool_call_started"])
-            turns = usage["calls"] or max(1, tool_calls)
+            turns = usage["turns"] or max(1, tool_calls)
 
             trace.append(
                 CanonicalTraceEvent(
@@ -517,7 +517,11 @@ def _aggregate_usage(events: list[dict[str, Any]]) -> dict[str, int]:
     Claude Code stream-json puts usage inside assistant message objects
     (message.usage) and also in the top-level result event.
     """
-    usage = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "calls": 0}
+    # Canonical parser-output shape: ``turns`` (not ``calls``), ``total``
+    # derived from in+out+cr+cw. claude-code's ``_aggregate_usage`` is
+    # called from run() which composes it with trace + final_text; the
+    # probe's replay reuses the same composition.
+    usage = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "total": 0, "turns": 0}
     for event in events:
         # Check top-level usage (result events)
         u = event.get("usage")
@@ -530,5 +534,6 @@ def _aggregate_usage(events: list[dict[str, Any]]) -> dict[str, int]:
         usage["output"] += int(u.get("output_tokens", 0) or u.get("output", 0))
         usage["cache_read"] += int(u.get("cache_read_input_tokens", 0) or u.get("cache_read", 0))
         usage["cache_write"] += int(u.get("cache_creation_input_tokens", 0) or u.get("cache_write", 0))
-        usage["calls"] += 1
+        usage["turns"] += 1
+    usage["total"] = usage["input"] + usage["output"] + usage["cache_read"] + usage["cache_write"]
     return usage

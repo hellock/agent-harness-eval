@@ -27,6 +27,7 @@ from . import register_adapter
 from .interface import (
     HarnessAdapter,
     PreparedRun,
+    detect_empty_output_silent_failure,
     detect_subprocess_failure,
 )
 
@@ -187,7 +188,7 @@ class ZeroClawAdapter(HarnessAdapter):
                     output_tokens=usage["output"],
                     cache_read_tokens=usage["cache_read"],
                     cache_write_tokens=usage["cache_write"],
-                    total_tokens=usage["total_tokens"],
+                    total_tokens=usage["total"],
                     cost_usd=calculate_cost(
                         model,
                         usage["input"],
@@ -196,7 +197,7 @@ class ZeroClawAdapter(HarnessAdapter):
                         usage["cache_write"],
                         pricing=self.pricing_override(),
                     ),
-                    tool_calls=usage["tool_calls"],
+                    tool_calls=session_data["tool_calls"],
                     turns=usage["turns"],
                 ),
             )
@@ -230,6 +231,31 @@ class ZeroClawAdapter(HarnessAdapter):
             trace = session_data["trace"]
             usage = session_data["usage"]
 
+            # Silent-failure guard: exit 0 + empty runtime_trace + empty
+            # final_text = failure, not completion. Happens with provider
+            # auth failures: zeroclaw logs the error to stderr and exits 0
+            # without writing anything useful to runtime_trace.jsonl.
+            empty_failure = detect_empty_output_silent_failure(
+                trace, final_text, command_label="ZeroClaw", stderr=result.stderr or ""
+            )
+            if empty_failure is not None:
+                return self._make_result(
+                    task,
+                    model,
+                    "failed",
+                    result.stdout or "",
+                    [
+                        CanonicalTraceEvent(
+                            type="task_failed",
+                            error=empty_failure.error,
+                            ts=to_canonical_ts(),
+                        )
+                    ],
+                    RunMetrics(latency_sec=latency_sec),
+                    failure_origin=empty_failure.failure_origin,
+                    infra_error_code=empty_failure.infra_error_code,
+                )
+
             trace.append(
                 CanonicalTraceEvent(
                     type="task_completed",
@@ -249,7 +275,7 @@ class ZeroClawAdapter(HarnessAdapter):
                     output_tokens=usage["output"],
                     cache_read_tokens=usage["cache_read"],
                     cache_write_tokens=usage["cache_write"],
-                    total_tokens=usage["total_tokens"],
+                    total_tokens=usage["total"],
                     cost_usd=calculate_cost(
                         model,
                         usage["input"],
@@ -258,7 +284,7 @@ class ZeroClawAdapter(HarnessAdapter):
                         usage["cache_write"],
                         pricing=self.pricing_override(),
                     ),
-                    tool_calls=usage["tool_calls"],
+                    tool_calls=session_data["tool_calls"],
                     turns=usage["turns"],
                 ),
             )
@@ -415,19 +441,23 @@ def _read_zeroclaw_runtime_trace(trace_path: str) -> dict[str, Any]:
     - ``tool_call_start`` / ``tool_result`` — contain tool call info
     - ``agent_start`` / ``agent_end`` — session boundaries
     """
+    # Canonical parser-output shape (see also codex, claude-code): the usage
+    # dict uses ``total`` (not ``total_tokens``) and ``tool_calls`` is
+    # returned top-level alongside usage, never nested inside it. Downstream
+    # probe / runner normalization assumes this shape; don't drift.
     trace: list[CanonicalTraceEvent] = []
     usage: dict[str, int] = {
         "input": 0,
         "output": 0,
         "cache_read": 0,
         "cache_write": 0,
-        "total_tokens": 0,
-        "tool_calls": 0,
+        "total": 0,
         "turns": 0,
     }
+    tool_calls = 0
 
     if not os.path.exists(trace_path):
-        return {"trace": trace, "usage": usage}
+        return {"trace": trace, "usage": usage, "tool_calls": tool_calls}
 
     # ZeroClaw's runtime_trace does NOT emit a stable ``tool_call_id`` — see
     # zeroclaw source at src/agent/loop_.rs:3111-3124 (``tool_call_start``)
@@ -477,7 +507,7 @@ def _read_zeroclaw_runtime_trace(trace_path: str) -> dict[str, Any]:
                 usage["input"] += input_t
                 usage["output"] += output_t
                 usage["cache_read"] += cache_read
-                usage["total_tokens"] += input_t + output_t + cache_read
+                usage["total"] += input_t + output_t + cache_read
 
                 content = payload.get("raw_response") or payload.get("text")
                 if isinstance(content, str) and content.strip():
@@ -506,7 +536,7 @@ def _read_zeroclaw_runtime_trace(trace_path: str) -> dict[str, Any]:
                         ts=ts,
                     )
                 )
-                usage["tool_calls"] += 1
+                tool_calls += 1
                 pending_tools.append(tool_name)
 
             elif event_type == "tool_call_result":
@@ -568,7 +598,7 @@ def _read_zeroclaw_runtime_trace(trace_path: str) -> dict[str, Any]:
             )
         )
 
-    return {"trace": trace, "usage": usage}
+    return {"trace": trace, "usage": usage, "tool_calls": tool_calls}
 
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")

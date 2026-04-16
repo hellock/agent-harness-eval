@@ -122,7 +122,8 @@ async def test_openclaw_run_builds_register_and_agent_commands_with_private_stat
                     type="message", role="assistant", text="OPENCLAW_OK", ts="2026-01-01T00:00:00+00:00"
                 )
             ],
-            "usage": {"input": 20, "output": 6, "cache_read": 0, "cache_write": 0, "total_tokens": 26, "calls": 1},
+            "usage": {"input": 20, "output": 6, "cache_read": 0, "cache_write": 0, "total": 26, "turns": 1},
+            "tool_calls": 0,
         },
     )
 
@@ -282,9 +283,10 @@ async def test_openclaw_timeout_recovers_partial_session_trace(
                 "output": 5,
                 "cache_read": 2,
                 "cache_write": 1,
-                "total_tokens": 18,
-                "calls": 3,
+                "total": 18,
+                "turns": 3,
             },
+            "tool_calls": 1,
         },
     )
 
@@ -390,9 +392,10 @@ async def test_openclaw_run_classifies_empty_subprocess_output_as_failed(
                 "output": 0,
                 "cache_read": 0,
                 "cache_write": 0,
-                "total_tokens": 0,
-                "calls": 0,
+                "total": 0,
+                "turns": 0,
             },
+            "tool_calls": 0,
         },
     )
 

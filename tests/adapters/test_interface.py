@@ -7,9 +7,15 @@ the post-mortem fields (``failure_origin``, ``infra_error_code``,
 
 from __future__ import annotations
 
-from agent_harness_eval.adapters.interface import HarnessAdapter
+from agent_harness_eval.adapters.interface import (
+    HarnessAdapter,
+    SubprocessFailure,
+    detect_empty_output_silent_failure,
+    detect_subprocess_failure,
+)
 from agent_harness_eval.task import Task
 from agent_harness_eval.types import CanonicalTraceEvent, RunMetrics
+from agent_harness_eval.utils.subprocess import SubprocessResult
 
 
 class _StubAdapter(HarnessAdapter):
@@ -137,3 +143,201 @@ def test_make_result_completed_strips_infra_fields() -> None:
     assert result.failure_origin is None
     assert result.infra_error_code is None
     assert result.infra_error_details is None
+
+
+# --- detect_subprocess_failure gating ---------------------------------------
+
+
+def _sp_result(
+    *,
+    stdout: str = "",
+    stderr: str = "",
+    exit_code: int | None = 0,
+    timed_out: bool = False,
+) -> SubprocessResult:
+    return SubprocessResult(
+        stdout=stdout,
+        stderr=stderr,
+        exit_code=exit_code,
+        timed_out=timed_out,
+    )
+
+
+def test_detect_subprocess_failure_returns_none_on_timeout() -> None:
+    """Timeout handling belongs to the caller; this helper only classifies
+    non-zero-exit failures. Without this gate, every timed-out run would
+    also get wrapped as a SubprocessFailure and misclassified."""
+    result = _sp_result(timed_out=True, exit_code=137)
+    assert detect_subprocess_failure(result, command_label="Codex") is None
+
+
+def test_detect_subprocess_failure_returns_none_on_clean_exit() -> None:
+    """Exit 0 and None both mean 'no subprocess-level failure' — the
+    adapter's parse-path will decide whether the output is usable."""
+    assert detect_subprocess_failure(_sp_result(exit_code=0), command_label="X") is None
+    assert detect_subprocess_failure(_sp_result(exit_code=None), command_label="X") is None
+
+
+def test_detect_subprocess_failure_wraps_nonzero_exit_with_classification() -> None:
+    """Non-zero exit + stderr with a known classifier keyword yields a
+    SubprocessFailure with the wrapper error message AND the
+    failure_origin/infra_error_code from detect_failure_origin_from_error.
+    """
+    result = _sp_result(
+        exit_code=1,
+        stderr="HTTP 429 Too Many Requests from provider",
+    )
+    failure = detect_subprocess_failure(result, command_label="ClaudeCode")
+    assert isinstance(failure, SubprocessFailure)
+    assert "ClaudeCode exited with code 1" in failure.error
+    assert "stderr:" in failure.error
+    assert "429" in failure.error
+    assert failure.failure_origin == "provider"
+    assert failure.infra_error_code == "provider_api_error"
+
+
+def test_detect_subprocess_failure_uses_stdout_when_stderr_empty() -> None:
+    """Some harnesses emit diagnostics to stdout. Keep both tails in the
+    wrapped error so the classifier has context."""
+    result = _sp_result(
+        exit_code=2,
+        stdout="Failed to parse JSONL",
+    )
+    failure = detect_subprocess_failure(result, command_label="Codex")
+    assert failure is not None
+    assert "stdout:" in failure.error
+    # Hits the adapter branch because of "parse"
+    assert failure.failure_origin == "adapter"
+    assert failure.infra_error_code == "adapter_output_error"
+
+
+def test_detect_subprocess_failure_unknown_when_no_keywords() -> None:
+    """Non-zero exit with unclassifiable stderr still returns a
+    SubprocessFailure — but with unknown origin, not None. Callers rely on
+    getting a non-None result whenever exit code is non-zero so they know
+    the subprocess path was the failure source.
+    """
+    result = _sp_result(exit_code=1, stderr="core dumped at 0x1337")
+    failure = detect_subprocess_failure(result, command_label="Zeroclaw")
+    assert failure is not None
+    assert failure.failure_origin == "unknown"
+    assert failure.infra_error_code is None
+
+
+def test_detect_subprocess_failure_truncates_long_error() -> None:
+    """Error is capped at 800 chars so a pathological stderr dump doesn't
+    overflow downstream fields (infra_error_details, trace event .error).
+    """
+    result = _sp_result(exit_code=1, stderr="x" * 10_000)
+    failure = detect_subprocess_failure(result, command_label="Label")
+    assert failure is not None
+    assert len(failure.error) <= 800
+
+
+# --- detect_empty_output_silent_failure ---------------------------------------
+
+
+def test_empty_output_guard_classifies_bare_run_as_failure() -> None:
+    """Run with no trace events and no final_text = silent failure, not
+    completion. v1 openclaw regression that now applies universally."""
+    failure = detect_empty_output_silent_failure(
+        trace=[],
+        final_text="",
+        command_label="Codex",
+    )
+    assert failure is not None
+    assert failure.failure_origin == "adapter"
+    assert failure.infra_error_code == "adapter_empty_output"
+    assert "Codex produced no output" in failure.error
+
+
+def test_empty_output_guard_lets_run_with_final_text_pass() -> None:
+    """A non-empty final_text counts as content — don't flip to failed."""
+    failure = detect_empty_output_silent_failure(
+        trace=[],
+        final_text="hello",
+        command_label="Hermes",
+    )
+    assert failure is None
+
+
+def test_empty_output_guard_lets_run_with_message_event_pass() -> None:
+    """A trace containing a real message event counts as content."""
+    failure = detect_empty_output_silent_failure(
+        trace=[
+            CanonicalTraceEvent(
+                type="message",
+                role="assistant",
+                text="ok",
+                ts="2026-01-01T00:00:00.000+00:00",
+            )
+        ],
+        final_text="",
+        command_label="ZeroClaw",
+    )
+    assert failure is None
+
+
+def test_empty_output_guard_lets_run_with_tool_call_pass() -> None:
+    """A tool call started counts as content even without assistant message —
+    agent did something, even if it crashed before finishing the reply."""
+    failure = detect_empty_output_silent_failure(
+        trace=[
+            CanonicalTraceEvent(
+                type="tool_call_started",
+                tool_name="read_file",
+                ts="2026-01-01T00:00:00.000+00:00",
+            )
+        ],
+        final_text="",
+        command_label="OpenClaw",
+    )
+    assert failure is None
+
+
+def test_empty_output_guard_ignores_only_task_completed() -> None:
+    """Synthesized task_completed alone does NOT count as content — it's
+    just the terminator the adapter appends. This is the realistic failure
+    mode: subprocess exits 0, parser finds no real events, adapter adds a
+    bare task_completed, and we must still classify as failed."""
+    failure = detect_empty_output_silent_failure(
+        trace=[
+            CanonicalTraceEvent(
+                type="task_completed",
+                ts="2026-01-01T00:00:00.000+00:00",
+            )
+        ],
+        final_text="",
+        command_label="OpenClaw",
+    )
+    assert failure is not None
+    assert failure.infra_error_code == "adapter_empty_output"
+
+
+def test_empty_output_guard_keeps_explicit_task_failure() -> None:
+    """A parsed task_failed event is already meaningful output and must not be
+    reclassified as an adapter-empty-output failure."""
+    failure = detect_empty_output_silent_failure(
+        trace=[
+            CanonicalTraceEvent(
+                type="task_failed",
+                error="provider returned 401",
+                ts="2026-01-01T00:00:00.000+00:00",
+            )
+        ],
+        final_text="",
+        command_label="Codex",
+    )
+    assert failure is None
+
+
+def test_empty_output_guard_includes_stderr_tail_when_provided() -> None:
+    """Stderr context is useful for post-mortem — include it in the error."""
+    failure = detect_empty_output_silent_failure(
+        trace=[],
+        final_text="",
+        command_label="ZeroClaw",
+        stderr="connection refused after 3 retries",
+    )
+    assert failure is not None
+    assert "connection refused" in failure.error

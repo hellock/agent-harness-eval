@@ -65,10 +65,10 @@ async def test_hermes_run_builds_expected_shell_script_and_env(
                 "output": 5,
                 "cache_read": 2,
                 "cache_write": 1,
-                "total_tokens": 18,
-                "tool_calls": 1,
+                "total": 18,
                 "turns": 1,
             },
+            "tool_calls": 1,
         },
     )
 
@@ -251,7 +251,8 @@ def test_extract_hermes_session_id_missing() -> None:
 def test_read_hermes_session_missing_db(tmp_path: Path) -> None:
     result = _read_hermes_session(str(tmp_path), "some-session-id")
     assert result["trace"] == []
-    assert result["usage"]["tool_calls"] == 0
+    # Canonical shape: ``tool_calls`` is top-level, not nested in usage.
+    assert result["tool_calls"] == 0
     assert result["usage"]["input"] == 0
 
 
@@ -400,12 +401,14 @@ def test_read_hermes_session_extracts_messages(tmp_path: Path) -> None:
 
     result = _read_hermes_session(str(tmp_path), session_id)
 
+    # Canonical shape: ``total`` (not ``total_tokens``), ``tool_calls``
+    # top-level alongside usage.
     assert result["usage"]["input"] == 1500
     assert result["usage"]["output"] == 800
     assert result["usage"]["cache_read"] == 200
     assert result["usage"]["cache_write"] == 100
-    assert result["usage"]["tool_calls"] == 2
-    assert result["usage"]["total_tokens"] == 2300
+    assert result["tool_calls"] == 2
+    assert result["usage"]["total"] == 2300
     assert result["usage"]["turns"] == 2
 
     trace = result["trace"]
