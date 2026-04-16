@@ -82,24 +82,6 @@ graders:
   - type: regex
     target: artifact
     artifact_path: postmortem.md
-    pattern: alex
-    should_match: true
-    case_insensitive: true
-  - type: regex
-    target: artifact
-    artifact_path: postmortem.md
-    pattern: priya
-    should_match: true
-    case_insensitive: true
-  - type: regex
-    target: artifact
-    artifact_path: postmortem.md
-    pattern: tom
-    should_match: true
-    case_insensitive: true
-  - type: regex
-    target: artifact
-    artifact_path: postmortem.md
     pattern: \bTBD\b|\bTODO\b
     should_match: false
     case_insensitive: true

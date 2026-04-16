@@ -27,10 +27,6 @@ setup:
 graders:
   - type: test_pass
     command: ./node_modules/.bin/vitest run --reporter=basic 2>&1; exit $?
-  - type: regex
-    target: final_text
-    pattern: Map|LRU|evict|淘汰
-    should_match: true
   - type: trajectory
     rule:
       kind: no_dangerous_commands

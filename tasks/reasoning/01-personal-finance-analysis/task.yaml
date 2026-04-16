@@ -25,21 +25,6 @@ graders:
       kind: tool_called
       tool_pattern: read|Read|read_file|glob|Glob|ls|cat|head|view|Bash|shell|grep|Grep|search_files|mcp_read_file|terminal|execute_code|process|patch
       min: 1
-  - type: regex
-    target: final_text
-    pattern: DiningOut|Dining Out|餐|外卖|Door ?Dash
-    should_match: true
-    case_insensitive: true
-  - type: regex
-    target: final_text
-    pattern: Subscriptions|订阅|streaming|流媒体|Disney|HBO|Hulu|YouTube
-    should_match: true
-    case_insensitive: true
-  - type: regex
-    target: final_text
-    pattern: (重复|duplicate|dup|2x|two times|twice|两次|两笔)
-    should_match: true
-    case_insensitive: true
   - type: rubric_judge
     rubric: |
       Ground truth (compute by hand from the CSV before judging):

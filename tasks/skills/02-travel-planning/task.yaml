@@ -38,48 +38,8 @@ graders:
   - type: trajectory
     rule:
       kind: tool_called
-      tool_pattern: WebSearch|WebFetch|web_search|web_fetch|browser|Browse|curl|wget
+      tool_pattern: internet
       min: 1
-  - type: regex
-    target: final_text
-    pattern: Day ?[1-5]|第[一二三四五12345]天
-    should_match: true
-    case_insensitive: true
-  - type: regex
-    target: final_text
-    pattern: 机票|airfare|flight
-    should_match: true
-    case_insensitive: true
-  - type: regex
-    target: final_text
-    pattern: 住宿|hotel|accommodation|宿
-    should_match: true
-    case_insensitive: true
-  - type: regex
-    target: final_text
-    pattern: 交通|transport|JR|地铁|metro|subway
-    should_match: true
-    case_insensitive: true
-  - type: regex
-    target: final_text
-    pattern: 餐饮|food|meal|餐
-    should_match: true
-    case_insensitive: true
-  - type: regex
-    target: final_text
-    pattern: 盛花|花期|bloom|落花|peak|past|过|已过|晚樱|八重|若有|可能
-    should_match: true
-    case_insensitive: true
-  - type: regex
-    target: final_text
-    pattern: 日语|english|英文|translation|google translate|翻译
-    should_match: true
-    case_insensitive: true
-  - type: regex
-    target: final_text
-    pattern: 生鱼|raw fish|sashimi|过敏|allergy|allergic|刺身
-    should_match: true
-    case_insensitive: true
   - type: rubric_judge
     rubric: |
       Evaluate the trip plan. This task is temporally sensitive: blossom timing

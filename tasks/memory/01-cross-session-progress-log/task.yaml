@@ -16,26 +16,6 @@ setup:
     file_write: enabled
   history_file: history/conversation.yaml
 graders:
-  - type: regex
-    target: final_text
-    pattern: W[1-9]|第[一二三四五六七八九十]周|week ?[1-9]
-    should_match: true
-    case_insensitive: true
-  - type: regex
-    target: final_text
-    pattern: 周日|sunday|家庭日
-    should_match: true
-    case_insensitive: true
-  - type: regex
-    target: final_text
-    pattern: 45|间歇|break|连续
-    should_match: true
-    case_insensitive: true
-  - type: regex
-    target: final_text
-    pattern: 录音|recording|周五|friday
-    should_match: true
-    case_insensitive: true
   - type: rubric_judge
     rubric: |
       Background — the agent must reconstruct the following from

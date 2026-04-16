@@ -27,27 +27,6 @@ graders:
       kind: tool_called
       tool_pattern: read|Read|read_file|glob|Glob|ls|cat|head|view|Bash|shell|grep|Grep|search_files|mcp_read_file|terminal|execute_code|process|patch
       min: 1
-  - type: regex
-    target: final_text
-    pattern: id.*action.*owner.*due
-    should_match: true
-    case_insensitive: true
-  - type: regex
-    target: final_text
-    pattern: Priya
-    should_match: true
-  - type: regex
-    target: final_text
-    pattern: Jordan
-    should_match: true
-  - type: regex
-    target: final_text
-    pattern: Tom
-    should_match: true
-  - type: regex
-    target: final_text
-    pattern: Linh
-    should_match: true
   - type: rubric_judge
     rubric: |
       Ground truth — the meeting contains 7 person-owned action items plus one
@@ -71,13 +50,16 @@ graders:
         - The broad self-review reminder as a table row, because owner must be a specific person name
 
       Required dimensions:
-      1. action_count_correct: extracted 6-7 person-owned items (missing 1 is OK; missing 3+ fails)
-      2. owner_specificity: every action has a real person name, no "team"
-      3. due_date_format: dates are in YYYY-MM-DD format and roughly correct (within ±2 days of ground truth) OR labeled TBD
-      4. blockers_captured: A5 references wireframes blocker; A7 references A6 / Jordan's PR blocker
-      5. parked_items_excluded: cohort analysis and CI runner upgrade are NOT in the table
-      6. risk_summary_present: there is a one-sentence risk note about which action is most at-risk (commonly: A5 SSO docs because it depends on A1, or A2 because of dependency chain)
+      1. table_format_present: answer uses the requested table structure with id/action/owner/due_date/blocker columns
+      2. action_count_correct: extracted 6-7 person-owned items (missing 1 is OK; missing 3+ fails)
+      3. owner_specificity: every action has a real person name, no "team"
+      4. due_date_format: dates are in YYYY-MM-DD format and roughly correct (within ±2 days of ground truth) OR labeled TBD
+      5. blockers_captured: A5 references wireframes blocker; A7 references A6 / Jordan's PR blocker
+      6. parked_items_excluded: cohort analysis and CI runner upgrade are NOT in the table
+      7. risk_summary_present: there is a one-sentence risk note about which action is most at-risk (commonly: A5 SSO docs because it depends on A1, or A2 because of dependency chain)
     dimensions:
+      - name: table_format_present
+        required: true
       - name: action_count_correct
         required: true
       - name: owner_specificity
