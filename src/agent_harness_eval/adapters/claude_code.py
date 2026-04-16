@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any, ClassVar
@@ -20,12 +21,22 @@ from ..types import CanonicalTraceEvent, RunMetrics, RunResult
 from ..utils.conversation import format_task_message
 from ..utils.cost import calculate_cost
 from ..utils.failure_origin import detect_failure_origin_from_error
+from ..utils.subprocess import (
+    SubprocessResult,
+    _install_subprocess_cleanup_handlers,
+    _kill_process_tree,
+    _preexec_new_pgroup,
+    _register_active_subprocess,
+    _terminate_process_tree,
+    _unregister_active_subprocess,
+)
 from ..utils.timestamps import task_completion_ts, to_canonical_ts
 from ..utils.workspace import create_run_layout, remove_workspace
 from . import register_adapter
 from .interface import (
     HarnessAdapter,
     PreparedRun,
+    _write_subprocess_debug_artifacts,
     detect_subprocess_failure,
 )
 
@@ -124,29 +135,77 @@ class ClaudeCodeAdapter(HarnessAdapter):
             message_text,
         ]
 
-        result = await self.executor.execute(
+        wrapped = self.executor.wrap_command(
             self.name,
             execution_policy,
             claude_bin,
             inner_args,
             inner_env,
+        )
+        helper_result = await _run_claude_streaming(
+            wrapped.command,
+            wrapped.args,
+            cwd=wrapped.cwd,
+            env=wrapped.env,
             timeout_ms=timeout_ms,
+        )
+        result = SubprocessResult(
+            stdout=helper_result["stdout"],
+            stderr=helper_result["stderr"],
+            exit_code=helper_result["exit_code"],
+            timed_out=helper_result["timed_out"],
         )
 
         latency_sec = asyncio.get_running_loop().time() - start_time
 
         if result.timed_out:
+            events = _parse_stream_json(result.stdout or "")
+            trace = _events_to_trace(events)
+            final_text = _extract_final_text(events)
+            usage = _aggregate_usage(events)
+            tool_calls = len([e for e in trace if e.type == "tool_call_started"])
+            turns = usage["turns"] or (1 if events else 0)
+            artifacts = _write_subprocess_debug_artifacts(
+                prepared,
+                stem="claude-code-timeout",
+                stdout=result.stdout or "",
+                stderr=result.stderr or "",
+            )
             return self._make_result(
                 task,
                 model,
                 "timed_out",
-                "",
-                [],
-                RunMetrics(latency_sec=task.timeout_sec),
+                final_text,
+                trace,
+                RunMetrics(
+                    latency_sec=latency_sec,
+                    input_tokens=usage["input"],
+                    output_tokens=usage["output"],
+                    cache_read_tokens=usage["cache_read"],
+                    cache_write_tokens=usage["cache_write"],
+                    total_tokens=usage["total"],
+                    cost_usd=calculate_cost(
+                        model,
+                        usage["input"],
+                        usage["output"],
+                        usage["cache_read"],
+                        usage["cache_write"],
+                        pricing=self.pricing_override(),
+                    ),
+                    tool_calls=tool_calls,
+                    turns=turns,
+                ),
+                artifacts=artifacts,
             )
 
         subprocess_failure = detect_subprocess_failure(result, command_label="Claude Code")
         if subprocess_failure:
+            artifacts = _write_subprocess_debug_artifacts(
+                prepared,
+                stem="claude-code-failed",
+                stdout=result.stdout or "",
+                stderr=result.stderr or "",
+            )
             return self._make_result(
                 task,
                 model,
@@ -162,6 +221,7 @@ class ClaudeCodeAdapter(HarnessAdapter):
                 RunMetrics(latency_sec=latency_sec),
                 failure_origin=subprocess_failure.failure_origin,
                 infra_error_code=subprocess_failure.infra_error_code,
+                artifacts=artifacts,
             )
 
         try:
@@ -249,6 +309,9 @@ async def _run_claude_streaming(
     timeout_ms: int,
 ) -> dict[str, Any]:
     """Run Claude Code subprocess and collect streaming JSON output."""
+    use_pgroup = sys.platform != "win32"
+    _install_subprocess_cleanup_handlers()
+
     proc = await asyncio.create_subprocess_exec(
         command,
         *args,
@@ -257,7 +320,9 @@ async def _run_claude_streaming(
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        preexec_fn=_preexec_new_pgroup if use_pgroup else None,
     )
+    _register_active_subprocess(proc, use_pgroup)
 
     stdout = ""
     stderr = ""
@@ -283,20 +348,23 @@ async def _run_claude_streaming(
             ),
             timeout=timeout_ms / 1000,
         )
+    except asyncio.CancelledError:
+        _terminate_process_tree(proc, use_pgroup)
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=5)
+        except TimeoutError:
+            _kill_process_tree(proc, use_pgroup)
+        raise
     except TimeoutError:
         timed_out = True
-        try:
-            proc.terminate()
-        except ProcessLookupError:
-            pass
+        _terminate_process_tree(proc, use_pgroup)
 
     try:
         await asyncio.wait_for(proc.wait(), timeout=5)
     except TimeoutError:
-        try:
-            proc.kill()
-        except ProcessLookupError:
-            pass
+        _kill_process_tree(proc, use_pgroup)
+    finally:
+        _unregister_active_subprocess(proc)
 
     return {
         "stdout": stdout,

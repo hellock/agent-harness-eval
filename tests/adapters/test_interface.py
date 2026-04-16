@@ -7,15 +7,24 @@ the post-mortem fields (``failure_origin``, ``infra_error_code``,
 
 from __future__ import annotations
 
+import asyncio
+from pathlib import Path
+
+import pytest
+
 from agent_harness_eval.adapters.interface import (
     HarnessAdapter,
+    PreparedRun,
     SubprocessFailure,
     detect_empty_output_silent_failure,
     detect_subprocess_failure,
 )
+from agent_harness_eval.config.runtime import RuntimeConfig
+from agent_harness_eval.executor import ExecutionPolicy
 from agent_harness_eval.task import Task
 from agent_harness_eval.types import CanonicalTraceEvent, RunMetrics
 from agent_harness_eval.utils.subprocess import SubprocessResult
+from agent_harness_eval.utils.workspace import create_run_layout, remove_workspace
 
 
 class _StubAdapter(HarnessAdapter):
@@ -38,6 +47,41 @@ class _StubAdapter(HarnessAdapter):
 
     def cleanup(self, prepared):  # type: ignore[override]
         raise NotImplementedError
+
+
+class _RunnableStubAdapter(HarnessAdapter):
+    name = "stub"
+
+    def __init__(self, executor) -> None:  # type: ignore[no-untyped-def]
+        super().__init__(RuntimeConfig(project_root=Path("/tmp")), executor)
+
+    def prepare(self, task, run_id):  # type: ignore[override]
+        raise NotImplementedError
+
+    async def run(self, prepared, model):  # type: ignore[override]
+        raise NotImplementedError
+
+    def cleanup(self, prepared):  # type: ignore[override]
+        raise NotImplementedError
+
+
+class _TimeoutExecutor:
+    async def execute(  # type: ignore[no-untyped-def]
+        self,
+        harness,
+        policy,
+        inner_command,
+        inner_args,
+        inner_env,
+        timeout_ms,
+    ) -> SubprocessResult:
+        await asyncio.sleep(0.01)
+        return SubprocessResult(
+            stdout="partial stdout",
+            stderr="partial stderr",
+            exit_code=None,
+            timed_out=True,
+        )
 
 
 def _task(timeout_sec: int = 30) -> Task:
@@ -72,6 +116,19 @@ def test_make_result_timed_out_stamps_default_failure_origin_and_ec() -> None:
     assert result.infra_error_code == "harness_timeout"
     assert result.infra_error_details is not None
     assert "42s" in result.infra_error_details
+
+
+def test_make_result_timed_out_reports_actual_elapsed_when_shorter_than_limit() -> None:
+    adapter = _StubAdapter()
+    result = adapter._make_result(
+        _task(timeout_sec=300),
+        "relay:gpt-5.4",
+        "timed_out",
+        "",
+        [],
+        RunMetrics(latency_sec=18.4),
+    )
+    assert result.infra_error_details == "hit harness timeout after 18.4s (limit 300s)"
 
 
 def test_make_result_timed_out_respects_explicit_overrides() -> None:
@@ -143,6 +200,36 @@ def test_make_result_completed_strips_infra_fields() -> None:
     assert result.failure_origin is None
     assert result.infra_error_code is None
     assert result.infra_error_details is None
+
+
+@pytest.mark.asyncio
+async def test_run_via_executor_timeout_persists_debug_artifacts() -> None:
+    adapter = _RunnableStubAdapter(_TimeoutExecutor())
+    layout = create_run_layout("stub-timeout-artifacts")
+    try:
+        run = PreparedRun(
+            task=_task(timeout_sec=300),
+            layout=layout,
+            execution_policy=ExecutionPolicy(workspace_dir=layout.workspace_dir, cwd=layout.workspace_dir),
+        )
+
+        result = await adapter._run_via_executor(
+            run,
+            "relay:gpt-5.4",
+            "stub",
+            [],
+            {},
+        )
+        assert result.status == "timed_out"
+        assert result.metrics.latency_sec > 0
+        assert result.metrics.latency_sec < 300
+        assert len(result.artifacts) == 2
+        assert {artifact["stream"] for artifact in result.artifacts} == {"stdout", "stderr"}
+        for artifact in result.artifacts:
+            artifact_path = Path(layout.output_dir) / artifact["path"]
+            assert artifact_path.is_file()
+    finally:
+        remove_workspace(layout.root_dir)
 
 
 # --- detect_subprocess_failure gating ---------------------------------------

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from ..config.providers import ApiFormat, ModelSpec, ProviderConfig
 from ..config.runtime import RuntimeConfig
@@ -127,6 +129,44 @@ def detect_empty_output_silent_failure(
         failure_origin="adapter",
         infra_error_code="adapter_empty_output",
     )
+
+
+def _write_subprocess_debug_artifacts(
+    prepared: PreparedRun,
+    *,
+    stem: str,
+    stdout: str,
+    stderr: str,
+) -> list[dict[str, str]]:
+    """Persist raw subprocess output under the run's output dir.
+
+    The runner already snapshots non-empty ``output/`` into ``traces/<run>/raw``,
+    so writing debug files here is enough to preserve them for post-mortems.
+    """
+    output_dir = prepared.layout.output_dir
+    if not output_dir:
+        return []
+
+    debug_dir = os.path.join(output_dir, "_debug")
+    os.makedirs(debug_dir, exist_ok=True)
+
+    artifacts: list[dict[str, str]] = []
+    for stream_name, text in (("stdout", stdout), ("stderr", stderr)):
+        if not text:
+            continue
+        filename = f"{stem}.{stream_name}.txt"
+        path = os.path.join(debug_dir, filename)
+        with open(path, "w", encoding="utf-8", errors="replace") as fh:
+            fh.write(text)
+        artifacts.append(
+            {
+                "path": os.path.relpath(path, output_dir),
+                "kind": "debug_text",
+                "stream": stream_name,
+            }
+        )
+
+    return artifacts
 
 
 def _harness_config_key(harness_name: str) -> str:
@@ -300,6 +340,7 @@ class HarnessAdapter(ABC):
           SubprocessResult — on successful subprocess exit (caller parses output)
           RunResult        — on timeout or subprocess failure (caller returns as-is)
         """
+        start_time = asyncio.get_running_loop().time()
         result = await self.executor.execute(
             self.name,
             prepared.execution_policy,
@@ -308,19 +349,33 @@ class HarnessAdapter(ABC):
             inner_env,
             timeout_ms=prepared.task.timeout_sec * 1000,
         )
+        latency_sec = asyncio.get_running_loop().time() - start_time
 
         if result.timed_out:
+            artifacts = _write_subprocess_debug_artifacts(
+                prepared,
+                stem=f"{self.name}-timeout",
+                stdout=result.stdout or "",
+                stderr=result.stderr or "",
+            )
             return self._make_result(
                 prepared.task,
                 model,
                 "timed_out",
                 "",
                 [],
-                RunMetrics(latency_sec=prepared.task.timeout_sec),
+                RunMetrics(latency_sec=latency_sec),
+                artifacts=artifacts,
             )
 
         failure = detect_subprocess_failure(result, command_label=self.name.title())
         if failure:
+            artifacts = _write_subprocess_debug_artifacts(
+                prepared,
+                stem=f"{self.name}-failed",
+                stdout=result.stdout or "",
+                stderr=result.stderr or "",
+            )
             return self._make_result(
                 prepared.task,
                 model,
@@ -333,9 +388,10 @@ class HarnessAdapter(ABC):
                         ts=to_canonical_ts(),
                     )
                 ],
-                RunMetrics(latency_sec=0),
+                RunMetrics(latency_sec=latency_sec),
                 failure_origin=failure.failure_origin,
                 infra_error_code=failure.infra_error_code,
+                artifacts=artifacts,
             )
 
         return result
@@ -351,6 +407,7 @@ class HarnessAdapter(ABC):
         failure_origin: FailureOrigin | None = None,
         infra_error_code: str | None = None,
         infra_error_details: str | None = None,
+        artifacts: list[dict[str, Any]] | None = None,
     ) -> RunResult:
         # Stamp default infra fields for ``timed_out`` so downstream metrics
         # (infra_failure_count, failure_taxonomy) actually see timeouts. Until
@@ -365,7 +422,11 @@ class HarnessAdapter(ABC):
             failure_origin = failure_origin or "adapter"
             infra_error_code = infra_error_code or "harness_timeout"
             if infra_error_details is None:
-                infra_error_details = f"hit harness timeout after {task.timeout_sec}s"
+                elapsed_sec = metrics.latency_sec
+                if elapsed_sec > 0 and abs(elapsed_sec - task.timeout_sec) > 0.05:
+                    infra_error_details = f"hit harness timeout after {elapsed_sec:.1f}s (limit {task.timeout_sec}s)"
+                else:
+                    infra_error_details = f"hit harness timeout after {task.timeout_sec}s"
         elif status == "failed" and infra_error_details is None:
             infra_error_details = final_text[:ERROR_DETAIL_MAX_CHARS]
 
@@ -378,7 +439,7 @@ class HarnessAdapter(ABC):
             model=model,
             status=status,
             final_text=final_text,
-            artifacts=[],
+            artifacts=list(artifacts or []),
             trace=trace,
             metrics=metrics,
             grader_results=[],

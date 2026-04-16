@@ -27,6 +27,7 @@ from . import register_adapter
 from .interface import (
     HarnessAdapter,
     PreparedRun,
+    _write_subprocess_debug_artifacts,
     detect_empty_output_silent_failure,
     detect_subprocess_failure,
 )
@@ -109,20 +110,33 @@ class ZeroClawAdapter(HarnessAdapter):
             inner_env,
             timeout_ms=timeout_ms,
         )
+        onboard_latency_sec = asyncio.get_running_loop().time() - start_time
 
         if onboard_result.timed_out:
+            artifacts = _write_subprocess_debug_artifacts(
+                prepared,
+                stem="zeroclaw-onboard-timeout",
+                stdout=onboard_result.stdout or "",
+                stderr=onboard_result.stderr or "",
+            )
             return self._make_result(
                 task,
                 model,
                 "timed_out",
                 _strip_zeroclaw_logs(onboard_result.stdout),
                 [],
-                RunMetrics(latency_sec=task.timeout_sec),
+                RunMetrics(latency_sec=onboard_latency_sec),
+                artifacts=artifacts,
             )
 
         onboard_failure = detect_subprocess_failure(onboard_result, command_label="ZeroClaw onboard")
         if onboard_failure:
-            latency_sec = asyncio.get_running_loop().time() - start_time
+            artifacts = _write_subprocess_debug_artifacts(
+                prepared,
+                stem="zeroclaw-onboard-failed",
+                stdout=onboard_result.stdout or "",
+                stderr=onboard_result.stderr or "",
+            )
             return self._make_result(
                 task,
                 model,
@@ -135,9 +149,10 @@ class ZeroClawAdapter(HarnessAdapter):
                         ts=to_canonical_ts(),
                     )
                 ],
-                RunMetrics(latency_sec=latency_sec),
+                RunMetrics(latency_sec=onboard_latency_sec),
                 failure_origin=onboard_failure.failure_origin,
                 infra_error_code=onboard_failure.infra_error_code,
+                artifacts=artifacts,
             )
 
         # Relax autonomy for eval (allow workspace access, no approval needed).
@@ -176,6 +191,12 @@ class ZeroClawAdapter(HarnessAdapter):
             session_data = _read_zeroclaw_runtime_trace(os.path.join(config_dir, "runtime_trace.jsonl"))
             trace = session_data["trace"]
             usage = session_data["usage"]
+            artifacts = _write_subprocess_debug_artifacts(
+                prepared,
+                stem="zeroclaw-timeout",
+                stdout=result.stdout or "",
+                stderr=result.stderr or "",
+            )
             return self._make_result(
                 task,
                 model,
@@ -183,7 +204,7 @@ class ZeroClawAdapter(HarnessAdapter):
                 _strip_zeroclaw_logs(result.stdout),
                 trace,
                 RunMetrics(
-                    latency_sec=task.timeout_sec,
+                    latency_sec=latency_sec,
                     input_tokens=usage["input"],
                     output_tokens=usage["output"],
                     cache_read_tokens=usage["cache_read"],
@@ -200,25 +221,59 @@ class ZeroClawAdapter(HarnessAdapter):
                     tool_calls=session_data["tool_calls"],
                     turns=usage["turns"],
                 ),
+                artifacts=artifacts,
             )
 
         subprocess_failure = detect_subprocess_failure(result, command_label="ZeroClaw")
         if subprocess_failure:
+            trace_path = os.path.join(config_dir, "runtime_trace.jsonl")
+            session_data = _read_zeroclaw_runtime_trace(trace_path)
+            trace = session_data["trace"]
+            if not trace:
+                fallback_trace = _recover_zeroclaw_trace_from_logs(result.stdout or "")
+                trace = fallback_trace["trace"]
+                session_data["tool_calls"] = fallback_trace["tool_calls"]
+            trace.append(
+                CanonicalTraceEvent(
+                    type="task_failed",
+                    error=subprocess_failure.error,
+                    ts=to_canonical_ts(),
+                )
+            )
+            usage = session_data["usage"]
+            artifacts = _write_subprocess_debug_artifacts(
+                prepared,
+                stem="zeroclaw-failed",
+                stdout=result.stdout or "",
+                stderr=result.stderr or "",
+            )
             return self._make_result(
                 task,
                 model,
                 "failed",
                 result.stdout or "",
-                [
-                    CanonicalTraceEvent(
-                        type="task_failed",
-                        error=subprocess_failure.error,
-                        ts=to_canonical_ts(),
-                    )
-                ],
-                RunMetrics(latency_sec=latency_sec),
+                trace,
+                RunMetrics(
+                    latency_sec=latency_sec,
+                    input_tokens=usage["input"],
+                    output_tokens=usage["output"],
+                    cache_read_tokens=usage["cache_read"],
+                    cache_write_tokens=usage["cache_write"],
+                    total_tokens=usage["total"],
+                    cost_usd=calculate_cost(
+                        model,
+                        usage["input"],
+                        usage["output"],
+                        usage["cache_read"],
+                        usage["cache_write"],
+                        pricing=self.pricing_override(),
+                    ),
+                    tool_calls=session_data["tool_calls"],
+                    turns=usage["turns"],
+                ),
                 failure_origin=subprocess_failure.failure_origin,
                 infra_error_code=subprocess_failure.infra_error_code,
+                artifacts=artifacts,
             )
 
         try:
@@ -599,6 +654,63 @@ def _read_zeroclaw_runtime_trace(trace_path: str) -> dict[str, Any]:
         )
 
     return {"trace": trace, "usage": usage, "tool_calls": tool_calls}
+
+
+_ZEROCLAW_TOOL_LOG_RE = re.compile(
+    r"^\s*(?P<ts>\d{4}-\d{2}-\d{2}T[^\s]+)\s+"
+    r"(?:INFO|WARN|ERROR|DEBUG|TRACE)\s+"
+    r"(?P<module>zeroclaw::tools::[a-zA-Z0-9_]+):\s+"
+    r"(?P<message>.+?)\s*$"
+)
+
+
+def _recover_zeroclaw_trace_from_logs(stdout: str) -> dict[str, Any]:
+    """Recover tool starts from ZeroClaw stdout when runtime_trace is missing.
+
+    Provider crashes can happen after tools already ran but before
+    ``runtime_trace.jsonl`` is flushed. ZeroClaw still logs tool activity to
+    stdout, so recover those starts to avoid misclassifying the run as having
+    made zero tool calls.
+    """
+    trace: list[CanonicalTraceEvent] = []
+    pending_tools: list[str] = []
+    tool_calls = 0
+
+    for raw_line in _strip_ansi(stdout).splitlines():
+        match = _ZEROCLAW_TOOL_LOG_RE.match(raw_line)
+        if match is None:
+            continue
+        module = match.group("module").rsplit("::", 1)[-1]
+        tool_name = module.removesuffix("_tool")
+        message = match.group("message").strip()
+        tool_input: dict[str, Any] | None = None
+        if tool_name == "web_search" and message.startswith("Searching web for: "):
+            tool_input = {"query": message.removeprefix("Searching web for: ").strip()}
+        elif message:
+            tool_input = {"message": message}
+        trace.append(
+            CanonicalTraceEvent(
+                type="tool_call_started",
+                tool_name=tool_name or "unknown",
+                input=tool_input,
+                ts=_normalize_runtime_trace_ts(match.group("ts")),
+            )
+        )
+        pending_tools.append(tool_name or "unknown")
+        tool_calls += 1
+
+    for tool_name in pending_tools:
+        trace.append(
+            CanonicalTraceEvent(
+                type="tool_call_completed",
+                tool_name=tool_name,
+                success=False,
+                output="<no result recorded>",
+                ts=to_canonical_ts(),
+            )
+        )
+
+    return {"trace": trace, "tool_calls": tool_calls}
 
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")

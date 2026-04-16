@@ -12,6 +12,7 @@ from agent_harness_eval.adapters.zeroclaw import (
     _normalize_runtime_trace_ts,
     _patch_zeroclaw_autonomy_config,
     _read_zeroclaw_runtime_trace,
+    _recover_zeroclaw_trace_from_logs,
 )
 from agent_harness_eval.config.providers import ProviderConfig
 from agent_harness_eval.config.runtime import RuntimeConfig
@@ -366,6 +367,100 @@ async def test_zeroclaw_run_syncs_workspace_back_even_when_agent_fails(
         adapter.cleanup(prepared)
 
 
+@pytest.mark.asyncio
+async def test_zeroclaw_run_recovers_tool_calls_from_stdout_logs_on_provider_failure(
+    isolated_run_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_config = RuntimeConfig(
+        project_root=isolated_run_dir,
+        providers={
+            "relay": ProviderConfig(
+                base_url="https://relay.example.com/v1",
+                api_key="anthropic-key",
+                api_format="anthropic",
+            )
+        },
+    )
+    stdout = (
+        "\x1b[2m2026-04-16T08:55:21.287537Z\x1b[0m \x1b[32m INFO\x1b[0m "
+        "\x1b[2mzeroclaw::tools::web_search_tool\x1b[0m\x1b[2m:\x1b[0m "
+        "Searching web for: 东京樱花2026年花期预测 4月中下旬\n"
+        "\x1b[2m2026-04-16T08:55:21.289887Z\x1b[0m \x1b[32m INFO\x1b[0m "
+        "\x1b[2mzeroclaw::tools::web_search_tool\x1b[0m\x1b[2m:\x1b[0m "
+        "Searching web for: 北京到东京机票价格2026年4月\n"
+    )
+    executor = SequentialRecordingExecutor(
+        runtime_config,
+        [
+            SubprocessResult(stdout="", stderr="", exit_code=0, timed_out=False),
+            SubprocessResult(
+                stdout=stdout,
+                stderr=(
+                    "Error: All providers/models failed. Attempts:\n"
+                    "provider=anthropic-custom:https://relay.example.com/v1 model=claude-sonnet-4-6 "
+                    "attempt 1/3: non_retryable; error=Anthropic API error (400 Bad Request)"
+                ),
+                exit_code=1,
+                timed_out=False,
+            ),
+        ],
+    )
+    adapter = ZeroClawAdapter(runtime_config, executor)
+    task = Task(
+        id="zeroclaw.regression.provider-failure-recovery",
+        category="skills",
+        description="zeroclaw provider failure retains tool trace",
+        user_query="Reply with ZERO_OK.",
+        timeout_sec=30,
+    )
+    prepared = adapter.prepare(task, "zeroclaw-provider-failure-recovery")
+    config_dir = Path(prepared.env["_EVAL_CONFIG_DIR"])
+
+    monkeypatch.setattr(
+        "agent_harness_eval.adapters.zeroclaw._patch_zeroclaw_autonomy_config",
+        lambda config_dir_arg, workspace_dir_arg, **kwargs: (config_dir / "config.toml").write_text(
+            '[security]\nlevel = "full"\n', encoding="utf-8"
+        ),
+    )
+    monkeypatch.setattr(
+        "agent_harness_eval.adapters.zeroclaw._read_zeroclaw_runtime_trace",
+        lambda trace_path: {
+            "trace": [],
+            "usage": {
+                "input": 0,
+                "output": 0,
+                "cache_read": 0,
+                "cache_write": 0,
+                "total": 0,
+                "turns": 0,
+            },
+            "tool_calls": 0,
+        },
+    )
+
+    try:
+        result = await adapter.run(prepared, "relay:claude-sonnet-4-6")
+
+        assert result.status == "failed"
+        assert result.failure_origin == "provider"
+        assert result.infra_error_code == "provider_api_error"
+        assert [event.type for event in result.trace] == [
+            "tool_call_started",
+            "tool_call_started",
+            "tool_call_completed",
+            "tool_call_completed",
+            "task_failed",
+        ]
+        assert result.trace[0].tool_name == "web_search"
+        assert result.trace[0].input == {"query": "东京樱花2026年花期预测 4月中下旬"}
+        assert result.trace[2].success is False
+        assert result.trace[2].output == "<no result recorded>"
+        assert result.metrics.tool_calls == 2
+    finally:
+        adapter.cleanup(prepared)
+
+
 def test_patch_zeroclaw_autonomy_config_relaxes_shell_policy_for_docker(tmp_path: Path) -> None:
     config_dir = tmp_path / ".zeroclaw"
     config_dir.mkdir()
@@ -478,6 +573,25 @@ async def test_zeroclaw_run_recovers_trace_and_usage_on_timeout(
         assert result.metrics.turns == 1
     finally:
         adapter.cleanup(prepared)
+
+
+def test_recover_zeroclaw_trace_from_logs_extracts_tool_inputs() -> None:
+    stdout = (
+        "\x1b[2m2026-04-16T08:55:21.287537Z\x1b[0m \x1b[32m INFO\x1b[0m "
+        "\x1b[2mzeroclaw::tools::web_search_tool\x1b[0m\x1b[2m:\x1b[0m "
+        "Searching web for: Tokyo cherry blossom 2026 forecast late April\n"
+    )
+
+    recovered = _recover_zeroclaw_trace_from_logs(stdout)
+
+    assert recovered["tool_calls"] == 1
+    assert [event.type for event in recovered["trace"]] == [
+        "tool_call_started",
+        "tool_call_completed",
+    ]
+    assert recovered["trace"][0].tool_name == "web_search"
+    assert recovered["trace"][0].input == {"query": "Tokyo cherry blossom 2026 forecast late April"}
+    assert recovered["trace"][1].success is False
 
 
 def test_normalize_runtime_trace_ts_truncates_nanoseconds_to_milliseconds() -> None:

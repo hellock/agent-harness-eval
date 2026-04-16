@@ -24,6 +24,7 @@ from . import register_adapter
 from .interface import (
     HarnessAdapter,
     PreparedRun,
+    _write_subprocess_debug_artifacts,
     detect_empty_output_silent_failure,
     detect_subprocess_failure,
 )
@@ -138,6 +139,12 @@ class CodexAdapter(HarnessAdapter):
             # The parser already survives a truncated final line via per-line
             # JSONDecodeError handling.
             partial = _parse_codex_jsonl(result.stdout or "")
+            artifacts = _write_subprocess_debug_artifacts(
+                prepared,
+                stem="codex-timeout",
+                stdout=result.stdout or "",
+                stderr=result.stderr or "",
+            )
             return self._make_result(
                 task,
                 model,
@@ -145,7 +152,7 @@ class CodexAdapter(HarnessAdapter):
                 partial["final_text"],
                 partial["trace"],
                 RunMetrics(
-                    latency_sec=task.timeout_sec,
+                    latency_sec=latency_sec,
                     input_tokens=partial["usage"]["input"],
                     output_tokens=partial["usage"]["output"],
                     cache_read_tokens=partial["usage"]["cache_read"],
@@ -162,10 +169,17 @@ class CodexAdapter(HarnessAdapter):
                     tool_calls=partial["tool_calls"],
                     turns=partial["usage"]["turns"],
                 ),
+                artifacts=artifacts,
             )
 
         subprocess_failure = detect_subprocess_failure(result, command_label="Codex")
         if subprocess_failure:
+            artifacts = _write_subprocess_debug_artifacts(
+                prepared,
+                stem="codex-failed",
+                stdout=result.stdout or "",
+                stderr=result.stderr or "",
+            )
             return self._make_result(
                 task,
                 model,
@@ -181,6 +195,7 @@ class CodexAdapter(HarnessAdapter):
                 RunMetrics(latency_sec=latency_sec),
                 failure_origin=subprocess_failure.failure_origin,
                 infra_error_code=subprocess_failure.infra_error_code,
+                artifacts=artifacts,
             )
 
         try:

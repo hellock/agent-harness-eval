@@ -20,7 +20,7 @@ from ..executor import attach_run_layout_mounts, filter_env, policy_from_task
 from ..task import Task
 from ..types import CanonicalTraceEvent, RunMetrics, RunResult
 from ..utils.conversation import format_task_message
-from ..utils.cost import calculate_cost
+from ..utils.cost import calculate_cost, calculate_cost_no_cache
 from ..utils.failure_origin import detect_failure_origin_from_error
 from ..utils.timestamps import task_completion_ts, to_canonical_ts
 from ..utils.workspace import create_run_layout, remove_workspace
@@ -124,6 +124,8 @@ class HermesAdapter(HarnessAdapter):
         # --- Execute ---
         result = await self._run_via_executor(prepared, model, "sh", ["-c", script], inner_env)
         if isinstance(result, RunResult):
+            if result.status == "failed":
+                return self._recover_failed_run_from_session(runtime_dir, model, result)
             return result
 
         # --- Parse output ---
@@ -228,6 +230,52 @@ class HermesAdapter(HarnessAdapter):
                 failure_origin=failure.get("failure_origin"),
                 infra_error_code=failure.get("infra_error_code"),
             )
+
+    def _recover_failed_run_from_session(self, runtime_dir: str, model: str, failed: RunResult) -> RunResult:
+        """Merge Hermes session state back into failed subprocess results.
+
+        Hermes may already have persisted tool/message rows in ``state.db`` before
+        the CLI exits non-zero on a later provider error. Returning the raw
+        subprocess failure loses those trace events and incorrectly reports
+        ``tool_calls=0``. Recover what we can from the session, then preserve the
+        original failure event as the terminal trace entry.
+        """
+        session_id = _extract_session_id(failed.final_text)
+        try:
+            session_data = _read_hermes_session(runtime_dir, session_id)
+        except Exception:
+            return failed
+
+        recovered_trace = list(session_data["trace"])
+        if not recovered_trace:
+            return failed
+
+        usage = session_data["usage"]
+        failed.trace = recovered_trace + failed.trace
+        failed.metrics.input_tokens = usage["input"]
+        failed.metrics.output_tokens = usage["output"]
+        failed.metrics.cache_read_tokens = usage["cache_read"]
+        failed.metrics.cache_write_tokens = usage["cache_write"]
+        failed.metrics.total_tokens = usage["total"]
+        failed.metrics.tool_calls = session_data["tool_calls"]
+        failed.metrics.turns = usage["turns"]
+        failed.metrics.cost_usd = calculate_cost(
+            model,
+            usage["input"],
+            usage["output"],
+            usage["cache_read"],
+            usage["cache_write"],
+            pricing=self.pricing_override(),
+        )
+        failed.metrics.cost_usd_no_cache = calculate_cost_no_cache(
+            model,
+            usage["input"],
+            usage["output"],
+            usage["cache_read"],
+            usage["cache_write"],
+            pricing=self.pricing_override(),
+        )
+        return failed
 
     def cleanup(self, prepared: PreparedRun) -> None:
         import shutil

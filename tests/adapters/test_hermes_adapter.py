@@ -194,7 +194,99 @@ async def test_hermes_run_returns_timed_out_result_without_session_parse(
         assert result.status == "timed_out"
         assert result.final_text == ""
         assert result.trace == []
-        assert result.metrics.latency_sec == 30
+        assert result.metrics.latency_sec >= 0
+        assert result.failure_origin == "adapter"
+        assert result.infra_error_code == "harness_timeout"
+    finally:
+        adapter.cleanup(prepared)
+
+
+@pytest.mark.asyncio
+async def test_hermes_run_recovers_session_trace_on_subprocess_failure(
+    isolated_run_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_config = RuntimeConfig(
+        project_root=isolated_run_dir,
+        providers={
+            "relay": ProviderConfig(
+                base_url="https://relay.example.com/v1",
+                api_key="openai-key",
+                api_format="openai-chat-completions",
+            )
+        },
+    )
+    executor = RecordingExecutor(
+        runtime_config,
+        SubprocessResult(
+            stdout=(
+                "┊ 📖 preparing read_file…\n"
+                "┊ 📖 read      budget/transactions.csv  0.8s\n"
+                "API call failed after 3 retries: HTTP 400\n\n"
+                "session_id: sess-123\n"
+            ),
+            stderr="provider rejected assistant tool message",
+            exit_code=1,
+            timed_out=False,
+        ),
+    )
+    adapter = HermesAdapter(runtime_config, executor)
+    task = Task(
+        id="hermes.regression.failed-session-recovery",
+        category="reasoning",
+        description="hermes failed session recovery",
+        user_query="Analyze the file and report back.",
+        workspace_files=[{"path": "README.md", "content": "seed\n"}],
+        timeout_sec=30,
+    )
+    prepared = adapter.prepare(task, "hermes-failed-session-recovery")
+
+    monkeypatch.setattr(
+        "agent_harness_eval.adapters.hermes._read_hermes_session",
+        lambda runtime_dir, session_id: {
+            "trace": [
+                CanonicalTraceEvent(
+                    type="tool_call_started",
+                    tool_name="read_file",
+                    input={"path": "budget/transactions.csv"},
+                    ts="2026-01-01T00:00:00+00:00",
+                ),
+                CanonicalTraceEvent(
+                    type="tool_call_completed",
+                    tool_name="read_file",
+                    success=True,
+                    output="date,amount",
+                    ts="2026-01-01T00:00:01+00:00",
+                ),
+            ],
+            "usage": {
+                "input": 100,
+                "output": 40,
+                "cache_read": 10,
+                "cache_write": 5,
+                "total": 140,
+                "turns": 1,
+            },
+            "tool_calls": 1,
+        },
+    )
+
+    try:
+        result = await adapter.run(prepared, "relay:claude-sonnet-4-6")
+
+        assert result.status == "failed"
+        assert result.trace[0].type == "tool_call_started"
+        assert result.trace[1].type == "tool_call_completed"
+        assert result.trace[-1].type == "task_failed"
+        assert result.metrics.tool_calls == 1
+        assert result.metrics.input_tokens == 100
+        assert result.metrics.output_tokens == 40
+        assert result.metrics.cache_read_tokens == 10
+        assert result.metrics.cache_write_tokens == 5
+        assert result.metrics.total_tokens == 140
+        assert result.metrics.turns == 1
+        assert result.metrics.cost_usd > 0
+        assert result.metrics.cost_usd_no_cache is not None
     finally:
         adapter.cleanup(prepared)
 

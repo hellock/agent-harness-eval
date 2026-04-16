@@ -271,6 +271,77 @@ def test_read_nanobot_session_extracts_trace_and_usage(
     assert session_data["tool_calls"] == 1
 
 
+def test_read_nanobot_session_recovers_pending_tool_calls_from_runtime_checkpoint(
+    isolated_run_dir: Path,
+) -> None:
+    session_dir = isolated_run_dir / "runtime" / "sessions"
+    session_dir.mkdir(parents=True)
+    session_path = session_dir / "checkpoint-session.jsonl"
+    session_path.write_text(
+        json.dumps(
+            {
+                "_type": "metadata",
+                "created_at": "2026-04-16T00:00:00+00:00",
+                "updated_at": "2026-04-16T00:00:05+00:00",
+                "metadata": {
+                    "last_usage": {
+                        "prompt_tokens": 21,
+                        "completion_tokens": 8,
+                        "total_tokens": 29,
+                    },
+                    "runtime_checkpoint": {
+                        "assistant_message": {
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "id": "tool-1",
+                                    "function": {
+                                        "name": "web_search",
+                                        "arguments": '{"query":"2026年东京樱花花期预测 4月中下旬"}',
+                                    },
+                                },
+                                {
+                                    "id": "tool-2",
+                                    "function": {
+                                        "name": "web_search",
+                                        "arguments": '{"query":"2026年东京赏樱推荐地点 上野 新宿御苑"}',
+                                    },
+                                },
+                            ],
+                        },
+                        "completed_tool_results": [],
+                    },
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    session_data = _read_nanobot_session(str(isolated_run_dir / "runtime"), "checkpoint-session")
+
+    assert [event.type for event in session_data["trace"]] == [
+        "tool_call_started",
+        "tool_call_started",
+        "tool_call_completed",
+        "tool_call_completed",
+    ]
+    assert session_data["trace"][0].tool_name == "web_search"
+    assert session_data["trace"][0].input == {"query": "2026年东京樱花花期预测 4月中下旬"}
+    assert session_data["trace"][1].input == {"query": "2026年东京赏樱推荐地点 上野 新宿御苑"}
+    assert session_data["trace"][2].success is False
+    assert session_data["trace"][2].output == "<no result recorded>"
+    assert session_data["usage"] == {
+        "input": 21,
+        "output": 8,
+        "cache_read": 0,
+        "cache_write": 0,
+        "total": 29,
+        "turns": 1,
+    }
+    assert session_data["tool_calls"] == 2
+
+
 def test_prime_nanobot_workspace_creates_required_templates(
     isolated_run_dir: Path,
 ) -> None:
@@ -313,6 +384,38 @@ def test_build_nanobot_runtime_config_uses_custom_provider_for_openai_compatible
     assert config["providers"]["custom"]["apiBase"] == "https://relay.example.com/v1"
     assert config["agents"]["defaults"]["provider"] == "custom"
     assert config["agents"]["defaults"]["model"] == "gpt-5.4"
+
+
+def test_nanobot_prepare_registers_session_log_as_debug_artifact(
+    isolated_run_dir: Path,
+) -> None:
+    runtime_config = RuntimeConfig(project_root=isolated_run_dir)
+    executor = RecordingExecutor(
+        runtime_config,
+        SubprocessResult(stdout="", stderr="", exit_code=0, timed_out=False),
+    )
+    adapter = NanobotAdapter(runtime_config, executor)
+    task = Task(
+        id="nanobot.regression.prepare-debug-artifact",
+        category="skills",
+        description="nanobot debug artifact registration",
+        user_query="Reply with NANOBOT_OK.",
+        timeout_sec=30,
+    )
+
+    prepared = adapter.prepare(task, "nanobot-prepare-debug-artifact")
+
+    try:
+        runtime_dir = Path(prepared.env["_EVAL_RUNTIME_DIR"])
+        session_id = prepared.env["_EVAL_SESSION_ID"]
+        assert prepared.debug_artifacts == [
+            {
+                "path": str(runtime_dir / "sessions" / f"{session_id}.jsonl"),
+                "dest_name": "nanobot-session.jsonl",
+            }
+        ]
+    finally:
+        adapter.cleanup(prepared)
 
 
 @pytest.mark.asyncio

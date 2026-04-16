@@ -318,7 +318,8 @@ async def test_openclaw_timeout_recovers_partial_session_trace(
         assert result.metrics.total_tokens == 18
         assert result.metrics.tool_calls == 1
         assert result.metrics.turns == 3
-        assert result.metrics.latency_sec == 30
+        assert result.metrics.latency_sec > 0
+        assert result.metrics.latency_sec < 30
     finally:
         adapter.cleanup(prepared)
 

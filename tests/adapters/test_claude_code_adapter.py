@@ -4,11 +4,13 @@ from pathlib import Path
 
 import pytest
 
+import agent_harness_eval.adapters.claude_code as claude_code_module
 from agent_harness_eval.adapters.claude_code import (
     ClaudeCodeAdapter,
     _events_to_trace,
     _extract_final_text,
     _parse_stream_json,
+    _run_claude_streaming,
 )
 from agent_harness_eval.config.providers import ProviderConfig
 from agent_harness_eval.config.runtime import RuntimeConfig
@@ -21,6 +23,7 @@ from ._regression_helpers import RecordingExecutor, arg_value
 @pytest.mark.asyncio
 async def test_claude_code_run_projects_provider_env_and_cli_contract(
     isolated_run_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runtime_config = RuntimeConfig(
         project_root=isolated_run_dir,
@@ -53,14 +56,31 @@ async def test_claude_code_run_projects_provider_env_and_cli_contract(
     prepared = adapter.prepare(task, "claude-regression")
 
     try:
+
+        async def fake_run_claude_streaming(
+            command: str,
+            args: list[str],
+            *,
+            cwd: str | None = None,
+            env: dict[str, str] | None = None,
+            timeout_ms: int,
+        ) -> dict[str, object]:
+            return {
+                "stdout": '{"type":"result","result":"CLAUDE_OK","usage":{"input_tokens":12,"output_tokens":3}}\n',
+                "stderr": "",
+                "exit_code": 0,
+                "timed_out": False,
+            }
+
+        monkeypatch.setattr(claude_code_module, "_run_claude_streaming", fake_run_claude_streaming)
         result = await adapter.run(prepared, "anthropic:claude-sonnet-4-6")
 
         assert result.status == "completed"
         assert result.final_text == "CLAUDE_OK"
-        assert len(executor.calls) == 1
-        call = executor.calls[0]
+        assert len(executor.calls) == 0
+        assert len(executor.wrapped_calls) == 1
+        call = executor.wrapped_calls[0]
         assert call["inner_command"] == "claude"
-        assert call["timeout_ms"] == 30_000
         args = call["inner_args"]
         assert isinstance(args, list)
         assert "--output-format" in args and arg_value(args, "--output-format") == "stream-json"
@@ -82,6 +102,7 @@ async def test_claude_code_run_projects_provider_env_and_cli_contract(
 @pytest.mark.asyncio
 async def test_claude_code_run_returns_failed_result_on_nonzero_exit(
     isolated_run_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runtime_config = RuntimeConfig(
         project_root=isolated_run_dir,
@@ -114,6 +135,23 @@ async def test_claude_code_run_returns_failed_result_on_nonzero_exit(
     prepared = adapter.prepare(task, "claude-nonzero-exit")
 
     try:
+
+        async def fake_run_claude_streaming(
+            command: str,
+            args: list[str],
+            *,
+            cwd: str | None = None,
+            env: dict[str, str] | None = None,
+            timeout_ms: int,
+        ) -> dict[str, object]:
+            return {
+                "stdout": "partial assistant output",
+                "stderr": "permission denied by sandbox",
+                "exit_code": 2,
+                "timed_out": False,
+            }
+
+        monkeypatch.setattr(claude_code_module, "_run_claude_streaming", fake_run_claude_streaming)
         result = await adapter.run(prepared, "anthropic:claude-sonnet-4-6")
 
         assert result.status == "failed"
@@ -122,6 +160,81 @@ async def test_claude_code_run_returns_failed_result_on_nonzero_exit(
         assert result.infra_error_code == "sandbox_permission_error"
         assert result.trace and result.trace[0].type == "task_failed"
         assert "Claude Code exited with code 2" in (result.trace[0].error or "")
+    finally:
+        adapter.cleanup(prepared)
+
+
+@pytest.mark.asyncio
+async def test_claude_code_timeout_preserves_partial_stream_trace(
+    isolated_run_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_config = RuntimeConfig(
+        project_root=isolated_run_dir,
+        providers={
+            "anthropic": ProviderConfig(
+                base_url="https://relay.example.com",
+                api_key="anthropic-key",
+                api_format="anthropic",
+            )
+        },
+    )
+    executor = RecordingExecutor(
+        runtime_config,
+        SubprocessResult(stdout="", stderr="", exit_code=0, timed_out=False),
+    )
+    adapter = ClaudeCodeAdapter(runtime_config, executor)
+    task = Task(
+        id="claude.regression.timeout-partial-stream",
+        category="coding",
+        description="claude timeout partial stream",
+        user_query="Reply with CLAUDE_OK after reading a file.",
+        workspace_files=[{"path": "README.md", "content": "seed\n"}],
+        timeout_sec=30,
+    )
+    prepared = adapter.prepare(task, "claude-timeout-partial-stream")
+
+    try:
+
+        async def fake_run_claude_streaming(
+            command: str,
+            args: list[str],
+            *,
+            cwd: str | None = None,
+            env: dict[str, str] | None = None,
+            timeout_ms: int,
+        ) -> dict[str, object]:
+            return {
+                "stdout": "\n".join(
+                    [
+                        '{"type":"assistant","message":{"usage":{"input_tokens":11,"output_tokens":0},"content":[{"type":"tool_use","name":"Read","input":{"file_path":"README.md"},"id":"tool-1"}]}}',
+                        '{"type":"user","message":{"content":[{"type":"tool_result","content":"seed\\n","tool_use_id":"tool-1"}]}}',
+                        '{"type":"assistant","message":{"usage":{"input_tokens":11,"output_tokens":4},"content":[{"type":"text","text":"Working on it"}]}}',
+                    ]
+                )
+                + "\n",
+                "stderr": "",
+                "exit_code": None,
+                "timed_out": True,
+            }
+
+        monkeypatch.setattr(claude_code_module, "_run_claude_streaming", fake_run_claude_streaming)
+
+        result = await adapter.run(prepared, "anthropic:claude-sonnet-4-6")
+
+        assert result.status == "timed_out"
+        assert result.final_text == "Working on it"
+        assert [event.type for event in result.trace] == [
+            "tool_call_started",
+            "tool_call_completed",
+            "message",
+        ]
+        assert result.trace[0].tool_name == "Read"
+        assert result.trace[1].success is True
+        assert result.metrics.input_tokens == 22
+        assert result.metrics.output_tokens == 4
+        assert result.metrics.tool_calls == 1
+        assert result.metrics.turns == 2
     finally:
         adapter.cleanup(prepared)
 
@@ -299,3 +412,64 @@ def test_events_to_trace_preserves_real_timestamps_when_forward() -> None:
     # neighbors instead of drifting to parse-time ``now()``.
     assert trace[0].ts < trace[1].ts < trace[2].ts
     assert trace[1].ts == "2026-04-15T07:30:28.501+00:00"
+
+
+@pytest.mark.asyncio
+async def test_run_claude_streaming_uses_shared_subprocess_cleanup_layers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, object]] = []
+
+    class DummyStream:
+        async def readline(self) -> bytes:
+            return b""
+
+    class DummyProc:
+        pid = 4321
+        returncode = 0
+        stdout = DummyStream()
+        stderr = DummyStream()
+
+        async def wait(self) -> int:
+            return 0
+
+    async def fake_create_subprocess_exec(command, *args, **kwargs):
+        calls.append(("preexec_fn", kwargs.get("preexec_fn")))
+        return DummyProc()
+
+    monkeypatch.setattr(
+        claude_code_module.asyncio,
+        "create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+    monkeypatch.setattr(
+        claude_code_module,
+        "_install_subprocess_cleanup_handlers",
+        lambda: calls.append(("install_handlers", None)),
+    )
+    monkeypatch.setattr(
+        claude_code_module,
+        "_register_active_subprocess",
+        lambda proc, use_pgroup: calls.append(("register", (proc.pid, use_pgroup))),
+    )
+    monkeypatch.setattr(
+        claude_code_module,
+        "_unregister_active_subprocess",
+        lambda proc: calls.append(("unregister", proc.pid)),
+    )
+
+    result = await _run_claude_streaming(
+        "claude",
+        ["--version"],
+        timeout_ms=1000,
+    )
+
+    assert result["timed_out"] is False
+    assert ("install_handlers", None) in calls
+    assert any(name == "register" and payload == (4321, True) for name, payload in calls)
+    assert ("unregister", 4321) in calls
+    preexec_call = next(payload for name, payload in calls if name == "preexec_fn")
+    if claude_code_module.sys.platform == "win32":
+        assert preexec_call is None
+    else:
+        assert preexec_call is claude_code_module._preexec_new_pgroup

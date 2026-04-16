@@ -30,6 +30,7 @@ from .interface import (
     HarnessAdapter,
     NativeMemoryFile,
     PreparedRun,
+    _write_subprocess_debug_artifacts,
     detect_subprocess_failure,
 )
 
@@ -255,11 +256,13 @@ class NanobotAdapter(HarnessAdapter):
         session_id = f"eval-{uuid.uuid4().hex[:16]}"
         runtime_dir = layout.state_dir
         os.makedirs(runtime_dir, exist_ok=True)
+        session_path = os.path.join(runtime_dir, "sessions", f"{session_id}.jsonl")
         return PreparedRun(
             task=task,
             layout=layout,
             env={"_EVAL_SESSION_ID": session_id, "_EVAL_RUNTIME_DIR": runtime_dir},
             execution_policy=execution_policy,
+            debug_artifacts=[{"path": session_path, "dest_name": "nanobot-session.jsonl"}],
         )
 
     async def run(self, prepared: PreparedRun, model: str) -> RunResult:
@@ -355,6 +358,12 @@ class NanobotAdapter(HarnessAdapter):
             except (OSError, ValueError, json.JSONDecodeError) as exc:
                 recovery_error = f"session.jsonl recovery failed ({type(exc).__name__}): {exc}"
 
+            artifacts = _write_subprocess_debug_artifacts(
+                prepared,
+                stem="nanobot-timeout",
+                stdout=result.stdout or "",
+                stderr=result.stderr or "",
+            )
             timeout_result = self._make_result(
                 task,
                 model,
@@ -362,7 +371,7 @@ class NanobotAdapter(HarnessAdapter):
                 final_text,
                 trace,
                 RunMetrics(
-                    latency_sec=task.timeout_sec,
+                    latency_sec=latency_sec,
                     input_tokens=usage["input"],
                     output_tokens=usage["output"],
                     cache_read_tokens=usage["cache_read"],
@@ -379,6 +388,7 @@ class NanobotAdapter(HarnessAdapter):
                     tool_calls=tool_calls_count,
                     turns=usage["turns"],
                 ),
+                artifacts=artifacts,
             )
             # Preserve distinguishing info when session-recovery itself failed,
             # so "timeout with no recoverable state" and "timeout + session
@@ -389,6 +399,12 @@ class NanobotAdapter(HarnessAdapter):
 
         subprocess_failure = detect_subprocess_failure(result, command_label="Nanobot")
         if subprocess_failure:
+            artifacts = _write_subprocess_debug_artifacts(
+                prepared,
+                stem="nanobot-failed",
+                stdout=result.stdout or "",
+                stderr=result.stderr or "",
+            )
             return self._make_result(
                 task,
                 model,
@@ -404,6 +420,7 @@ class NanobotAdapter(HarnessAdapter):
                 RunMetrics(latency_sec=latency_sec),
                 failure_origin=subprocess_failure.failure_origin,
                 infra_error_code=subprocess_failure.infra_error_code,
+                artifacts=artifacts,
             )
 
         try:
@@ -669,6 +686,7 @@ def _read_nanobot_session(runtime_dir: str, session_id: str) -> dict[str, Any]:
         return {"trace": trace, "usage": usage, "tool_calls": tool_calls_count}
 
     pending_tools: dict[str, str] = {}
+    checkpoint_event: dict[str, Any] | None = None
     with open(session_path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
@@ -683,6 +701,12 @@ def _read_nanobot_session(runtime_dir: str, session_id: str) -> dict[str, Any]:
                 usage["cache_read"] = int(last_usage.get("cache_read_input_tokens", last_usage.get("cached_tokens", 0)))
                 usage["cache_write"] = int(last_usage.get("cache_creation_input_tokens", 0))
                 usage["total"] = int(last_usage.get("total_tokens", 0))
+                checkpoint = event.get("metadata", {}).get("runtime_checkpoint")
+                if isinstance(checkpoint, dict):
+                    checkpoint_event = {
+                        "timestamp": event.get("updated_at") or event.get("created_at"),
+                        "checkpoint": checkpoint,
+                    }
                 continue
 
             role = event.get("role")
@@ -760,6 +784,67 @@ def _read_nanobot_session(runtime_dir: str, session_id: str) -> dict[str, Any]:
                         success=True,
                         output=content[:TOOL_OUTPUT_MAX_CHARS] if content else None,
                         ts=ts,
+                    )
+                )
+
+    if not trace and checkpoint_event is not None:
+        checkpoint = checkpoint_event["checkpoint"]
+        checkpoint_ts = _normalize_session_ts(checkpoint_event.get("timestamp"))
+        assistant_message = checkpoint.get("assistant_message")
+        if isinstance(assistant_message, dict):
+            assistant_content = assistant_message.get("content", "")
+            if isinstance(assistant_content, str) and assistant_content.strip():
+                trace.append(
+                    CanonicalTraceEvent(
+                        type="message",
+                        role="assistant",
+                        text=assistant_content,
+                        ts=checkpoint_ts,
+                    )
+                )
+            assistant_tool_calls = assistant_message.get("tool_calls")
+            if isinstance(assistant_tool_calls, list) and assistant_tool_calls:
+                usage["turns"] = max(usage["turns"], 1)
+                for tool_call in assistant_tool_calls:
+                    function = tool_call.get("function", {}) if isinstance(tool_call, dict) else {}
+                    tool_id = tool_call.get("id") if isinstance(tool_call, dict) else None
+                    tool_name = function.get("name", "unknown")
+                    raw_arguments = function.get("arguments")
+                    tool_input: Any = raw_arguments
+                    if isinstance(raw_arguments, str):
+                        try:
+                            tool_input = json.loads(raw_arguments)
+                        except json.JSONDecodeError:
+                            tool_input = raw_arguments
+                    trace.append(
+                        CanonicalTraceEvent(
+                            type="tool_call_started",
+                            tool_name=tool_name,
+                            input=tool_input,
+                            ts=checkpoint_ts,
+                        )
+                    )
+                    tool_calls_count += 1
+                    if isinstance(tool_id, str):
+                        pending_tools[tool_id] = tool_name
+
+        completed_tool_results = checkpoint.get("completed_tool_results")
+        if isinstance(completed_tool_results, list):
+            for item in completed_tool_results:
+                if not isinstance(item, dict):
+                    continue
+                tool_id = item.get("tool_call_id") or item.get("id")
+                tool_name = pending_tools.pop(tool_id, item.get("name", "unknown"))
+                content = item.get("content", "")
+                if not isinstance(content, str):
+                    content = json.dumps(content, ensure_ascii=False) if content is not None else ""
+                trace.append(
+                    CanonicalTraceEvent(
+                        type="tool_call_completed",
+                        tool_name=tool_name,
+                        success=not item.get("is_error", False),
+                        output=content[:TOOL_OUTPUT_MAX_CHARS] if content else None,
+                        ts=checkpoint_ts,
                     )
                 )
 
