@@ -135,7 +135,6 @@ def _matches_tool_pattern(
     """
     tool_name = event.tool_name or ""
 
-    # Check read category keyword fallback (Issue #14)
     pattern_lower = pattern.lower()
     if pattern_lower in _READ_CATEGORY_KEYWORDS:
         # Direct name match for read-like tools
@@ -148,6 +147,9 @@ def _matches_tool_pattern(
                 if rp.search(input_text):
                     return True
         return False
+
+    if pattern_lower in {"internet", "web"}:
+        return _event_attempts_internet(event)
 
     # Regular pattern matching against tool name
     try:
@@ -165,6 +167,30 @@ def _shell_command_uses_internet(input_text: str) -> bool:
     if not input_text:
         return False
     return bool(_INTERNET_URL_PATTERN.search(input_text) or _INTERNET_COMMAND_PATTERN.search(input_text))
+
+
+def _input_declares_web_toolset(input_value: object) -> bool:
+    if isinstance(input_value, dict):
+        toolsets = input_value.get("toolsets")
+        if isinstance(toolsets, list) and any(str(item).lower() == "web" for item in toolsets):
+            return True
+        return any(_input_declares_web_toolset(value) for value in input_value.values())
+    if isinstance(input_value, list):
+        return any(_input_declares_web_toolset(item) for item in input_value)
+    return False
+
+
+def _event_attempts_internet(event: CanonicalTraceEvent) -> bool:
+    tool_name = event.tool_name or ""
+    input_text = _tool_input_str(event)
+
+    if tool_name.lower() in {n.lower() for n in _SHELL_TOOL_NAMES} and _shell_command_uses_internet(input_text):
+        return True
+
+    if _input_declares_web_toolset(event.input):
+        return True
+
+    return any(pat.search(tool_name) or pat.search(input_text) for pat in _INTERNET_TOOL_PATTERNS)
 
 
 def _check_tool_called(
@@ -379,14 +405,13 @@ def _check_boundary_respected(
         input_text = _tool_input_str(tc)
 
         if constraint == "internet":
-            # Check for internet-related tool calls
-            if name.lower() in {n.lower() for n in _SHELL_TOOL_NAMES} and _shell_command_uses_internet(input_text):
-                violations.append(f"Internet access via shell '{name}'")
-            else:
-                for pat in _INTERNET_TOOL_PATTERNS:
-                    if pat.search(name) or pat.search(input_text):
-                        violations.append(f"Internet access via '{name}'")
-                        break
+            if _event_attempts_internet(tc):
+                if name.lower() in {n.lower() for n in _SHELL_TOOL_NAMES} and _shell_command_uses_internet(input_text):
+                    violations.append(f"Internet access via shell '{name}'")
+                elif _input_declares_web_toolset(tc.input):
+                    violations.append(f"Internet access delegated via '{name}'")
+                else:
+                    violations.append(f"Internet access via '{name}'")
 
         elif constraint == "shell":
             # Check for shell/command execution

@@ -163,6 +163,41 @@ async def test_run_graders_sanitizes_final_text_on_failed_status() -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_graders_preserves_timed_out_partial_final_text() -> None:
+    task = Task(
+        id="task.graders.timeout_partial",
+        category="coding",
+        description="timed out runs may still contain partial answers",
+        user_query="mention Map in the answer",
+        graders=[
+            RegexGrader(
+                target="final_text",
+                pattern="Map",
+                should_match=True,
+            ),
+        ],
+        timeout_sec=30,
+    )
+    timed_out_result = RunResult(
+        task_id="task.graders.timeout_partial",
+        harness="openclaw",
+        run_id="run-openclaw-1",
+        run_index=1,
+        model="relay:claude-sonnet-4-6",
+        status="timed_out",
+        final_text="测试全绿, 内部存储已经改成 Map.",
+        failure_origin="adapter",
+        infra_error_code="harness_timeout",
+    )
+
+    grader_results = await run_graders(task, timed_out_result, None)
+
+    assert len(grader_results) == 1
+    assert grader_results[0].grader_type == "regex"
+    assert grader_results[0].passed is True
+
+
+@pytest.mark.asyncio
 async def test_run_graders_emits_rubric_placeholder_after_deterministic_failure() -> None:
     """When a deterministic gate fails we don't burn a judge-LLM call on
     the run — but we still emit a ``rubric_judge`` placeholder with score=0

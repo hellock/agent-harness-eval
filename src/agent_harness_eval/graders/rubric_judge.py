@@ -6,8 +6,10 @@ import json
 import logging
 import os
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from ..task import Task
 from ..types import (
     CanonicalTraceEvent,
     RunResult,
@@ -127,6 +129,7 @@ def _build_tool_sequence(trace: Sequence[CanonicalTraceEvent]) -> str:
 
 async def run_rubric_judge(
     spec: GraderSpec,
+    task: Task,
     result: RunResult,
     judge_llm: JudgeLLM,
     workspace_dir: str | None,
@@ -147,6 +150,9 @@ async def run_rubric_judge(
     # Build prompt components
     tool_summary = _build_tool_summary(result.trace)
     tool_sequence = _build_tool_sequence(result.trace)
+    evaluation_utc = datetime.now(UTC).isoformat(timespec="seconds")
+    evaluation_local = datetime.now().astimezone().isoformat(timespec="seconds")
+    evaluation_local_tz = datetime.now().astimezone().tzname() or "unknown"
 
     # Read workspace snapshots for ground truth
     snapshots_str = ""
@@ -181,14 +187,24 @@ async def run_rubric_judge(
 
     prompt = f"""You are an expert judge evaluating an AI agent's task completion.
 
+## Evaluation Context
+- Canonical evaluation time (UTC): {evaluation_utc}
+- Local evaluation time (informational only): {evaluation_local}
+- Local evaluation timezone: {evaluation_local_tz}
+- Task ID: {task.id}
+- Task description: {task.description}
+
+## Original User Task
+{task.user_query[:5000]}
+
 ## Rubric
 {rubric}
 
 ## Dimensions
 {dim_desc}
 
-## Agent's Final Response
-{result.final_text[:5000] if result.final_text else "(empty)"}
+    ## Agent's Final Response
+    {result.final_text if result.final_text else "(empty)"}
 
 ## Tool Call Sequence
 {tool_sequence}
@@ -207,6 +223,10 @@ async def run_rubric_judge(
 ## Instructions
 Evaluate whether the agent successfully completed the task according to the rubric.
 Be strict but fair. Consider both the final output and the approach taken.
+Use the canonical UTC evaluation time above as the primary current-date/current-time
+context. Treat the local evaluation time as informational only. Do not assume a
+different current date than the one provided here unless the task itself explicitly
+defines a different timezone for interpretation.
 
 {response_format}
 """

@@ -53,17 +53,19 @@ async def run_graders(
     """
     specs = list(task.graders)
 
-    # For non-completed runs, ``final_text`` typically carries stderr /
-    # bootstrap logs (see ``adapters.interface._make_result``), not the
-    # agent's actual answer. Text-based graders would then score that log
-    # dump as if it were a real response, occasionally producing spurious
-    # passes — observed in rerun-selected-no-codex-docker-v2, where a
-    # zeroclaw provider_api_error run got 2 false regex PASSes off an ANSI
-    # log. Hand graders a sanitized copy with empty ``final_text``; the
-    # original (persisted) result is untouched, and workspace-based graders
-    # (file_exists, test_pass, trajectory, test_suite) still see real state
-    # because we only null out the text field.
-    if result.status != "completed":
+    # Failed / N/A runs usually carry stderr / bootstrap logs in
+    # ``final_text`` (see ``adapters.interface._make_result``), not the
+    # agent's answer. Text-based graders would then score that log dump as
+    # if it were a response, producing spurious passes — observed in the
+    # v2 rerun on a zeroclaw provider_api_error run.
+    #
+    # Timeouts are different: several adapters recover a partial assistant
+    # answer from the trace/session file and store that in ``final_text``.
+    # Blanking timed-out runs caused deterministic false negatives in
+    # coding.01/openclaw: tests passed and the partial answer clearly said
+    # "Map", but regex graders saw an empty string. Preserve timed-out
+    # partial answers and only scrub unequivocal non-answer statuses.
+    if result.status in {"failed", "not_applicable"}:
         result = replace(result, final_text="")
 
     # Auto-inject boundary_respected checks for disabled constraints
@@ -214,7 +216,7 @@ async def _dispatch_grader(
                     score=0.0,
                     details="No judge LLM configured",
                 )
-            return await run_rubric_judge(spec, result, judge_llm, workspace_dir)
+            return await run_rubric_judge(spec, task, result, judge_llm, workspace_dir)
         case _:
             logger.warning("Unhandled grader type: %s", spec.type)
             return None
