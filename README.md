@@ -221,8 +221,14 @@ agent-harness-eval run --config eval.local.yaml --model openai:gpt-5.4
 # Multi-model matrix
 agent-harness-eval run --config eval.local.yaml --model anthropic:claude-sonnet-4-6,openai:gpt-5.4
 
-# Regenerate reports from existing results
+# Regenerate reports from existing results (does not regrade)
 agent-harness-eval report --config eval.local.yaml --input results/<run-dir>/data/runs.jsonl
+
+# Regrade replayable graders, then rebuild reports
+agent-harness-eval report --config eval.local.yaml --input results/<run-dir>/data/runs.jsonl --regrade
+
+# Override judge model only when regrading
+agent-harness-eval report --config eval.local.yaml --input results/<run-dir>/data/runs.jsonl --regrade --judge-model openai:gpt-5.4
 ```
 
 ### CLI Options

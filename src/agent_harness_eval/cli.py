@@ -17,9 +17,21 @@ from .config.providers import ModelSpec, ProviderConfig
 from .config.runtime import RuntimeConfig, build_runtime_config
 from .executor import create_executor, resolve_executor_backend
 from .executor.docker import ensure_managed_harness_images, resolve_docker_image
+from .graders.interface import expand_grader_specs, grader_name, run_graders
 from .graders.judge_client import create_judge_llm
+from .graders.specs import (
+    FileExistsGrader,
+    GraderResult,
+    GraderSpec,
+    JsonSchemaGrader,
+    RegexGrader,
+    RubricJudgeGrader,
+    TestPassGrader,
+    TestSuiteGrader,
+    TrajectoryGrader,
+)
 from .task import Task
-from .types import EvalConfig
+from .types import EvalConfig, RunResult, run_result_from_dict, run_result_to_dict
 
 
 def _load_config(config_path: str | None) -> tuple[Path, Any, RuntimeConfig]:
@@ -112,7 +124,16 @@ def _create_parser() -> argparse.ArgumentParser:
     report_parser.add_argument("--config", "-c", **_config_kwargs)  # type: ignore[arg-type]
     report_parser.add_argument("--input", type=str, required=True, help="Path to runs.jsonl")
     report_parser.add_argument("--output", type=str, help="Output directory")
-    report_parser.add_argument("--judge-model", type=str, help="Model for judge graders (provider:model)")
+    report_parser.add_argument(
+        "--regrade",
+        action="store_true",
+        help="Recompute replayable grader results before generating reports.",
+    )
+    report_parser.add_argument(
+        "--judge-model",
+        type=str,
+        help="Override judge model for `report --regrade` (provider:model).",
+    )
 
     return parser
 
@@ -152,6 +173,195 @@ def _parse_cli_model_specs(cli_value: str) -> list[ModelSpec]:
     from .config.providers import parse_model_spec
 
     return [parse_model_spec(s.strip()) for s in cli_value.split(",") if s.strip()]
+
+
+def _infer_report_dirs(input_path: str, output_arg: str | None) -> tuple[str, str]:
+    source_dir = os.path.dirname(input_path)
+    if os.path.basename(input_path) == "runs.jsonl" and os.path.basename(source_dir) == "data":
+        source_dir = os.path.dirname(source_dir)
+    return source_dir, (output_arg or source_dir)
+
+
+def _resolve_report_judge_model_spec(
+    args: argparse.Namespace,
+    eval_yaml: dict[str, Any],
+) -> ModelSpec | None:
+    from .config.providers import parse_model_spec
+
+    if getattr(args, "judge_model", None) and not getattr(args, "regrade", False):
+        raise ValueError("report --judge-model requires --regrade")
+
+    if getattr(args, "regrade", False):
+        if args.judge_model:
+            return parse_model_spec(args.judge_model)
+        if eval_yaml.get("judge_model"):
+            return _judge_spec_from_yaml(eval_yaml["judge_model"])
+        return None
+
+    if eval_yaml.get("judge_model"):
+        return _judge_spec_from_yaml(eval_yaml["judge_model"])
+    return None
+
+
+def _result_has_rubric_judge(task: Task) -> bool:
+    return any(isinstance(spec, RubricJudgeGrader) for spec in expand_grader_specs(task))
+
+
+def _task_with_graders(task: Task, graders: list[GraderSpec]) -> Task:
+    return Task(
+        id=task.id,
+        category=task.category,
+        description=task.description,
+        user_query=task.user_query,
+        graders=graders,
+        timeout_sec=task.timeout_sec,
+        task_dir=task.task_dir,
+        workspace_dir=task.workspace_dir,
+        workspace_files=task.workspace_files,
+        history_file=task.history_file,
+        conversation_history=task.conversation_history,
+        native_memory=task.native_memory,
+        memory_state=task.memory_state,
+        prepare_commands=task.prepare_commands,
+        tool_boundary=task.tool_boundary,
+    )
+
+
+def _resolve_regrade_workspace(trace_dir: str) -> tuple[str | None, str]:
+    kept_workspace_file = os.path.join(trace_dir, "kept_workspace.txt")
+    if os.path.isfile(kept_workspace_file):
+        kept_workspace = Path(kept_workspace_file).read_text(encoding="utf-8").strip()
+        if kept_workspace and os.path.isdir(kept_workspace):
+            return kept_workspace, "kept_workspace"
+
+    run_output_dir = os.path.join(trace_dir, "raw", "run-output")
+    if os.path.isdir(run_output_dir):
+        return run_output_dir, "run_output"
+    return None, "none"
+
+
+def _is_replayable_grader(
+    spec: GraderSpec,
+    *,
+    workspace_dir: str | None,
+    workspace_source: str,
+    judge_llm: Any | None,
+) -> bool:
+    match spec:
+        case TrajectoryGrader():
+            return True
+        case RegexGrader(target="final_text"):
+            return True
+        case JsonSchemaGrader(target="final_text"):
+            return True
+        case FileExistsGrader():
+            return workspace_dir is not None
+        case RegexGrader():
+            return workspace_dir is not None
+        case JsonSchemaGrader():
+            return workspace_dir is not None
+        case RubricJudgeGrader(snapshot_paths=paths):
+            if judge_llm is None:
+                return False
+            return not paths or workspace_dir is not None
+        case TestPassGrader() | TestSuiteGrader():
+            return workspace_source == "kept_workspace"
+        case _:
+            return False
+
+
+def _original_grader_map(result: RunResult) -> dict[str, GraderResult]:
+    return {grader.name: grader for grader in result.grader_results}
+
+
+async def _regrade_result(
+    result: RunResult,
+    task: Task,
+    judge_llm: Any | None,
+    source_output_dir: str,
+) -> RunResult:
+    trace_dir = os.path.join(source_output_dir, "traces", result.run_id)
+    workspace_dir, workspace_source = _resolve_regrade_workspace(trace_dir)
+    expanded_specs = expand_grader_specs(task)
+    replayable_specs = [
+        spec
+        for spec in expanded_specs
+        if _is_replayable_grader(
+            spec,
+            workspace_dir=workspace_dir,
+            workspace_source=workspace_source,
+            judge_llm=judge_llm,
+        )
+    ]
+
+    replayed_by_name: dict[str, GraderResult] = {}
+    if replayable_specs:
+        replay_task = _task_with_graders(task, replayable_specs)
+        replayed = await run_graders(replay_task, result, judge_llm, workspace_dir)
+        replayed_by_name = {grader.name: grader for grader in replayed}
+
+    original_by_name = _original_grader_map(result)
+    merged_graders: list[GraderResult] = []
+    for spec in expanded_specs:
+        name = grader_name(spec)
+        if name in replayed_by_name:
+            merged_graders.append(replayed_by_name[name])
+            continue
+        original = original_by_name.get(name)
+        if original is not None:
+            merged_graders.append(original)
+            continue
+        merged_graders.append(
+            GraderResult(
+                grader_type=spec.type,
+                name=name,
+                passed=False,
+                score=0.0,
+                details="Skipped regrade: original workspace-dependent result unavailable.",
+            )
+        )
+
+    return RunResult(
+        task_id=result.task_id,
+        harness=result.harness,
+        run_id=result.run_id,
+        run_index=result.run_index,
+        model=result.model,
+        status=result.status,
+        final_text=result.final_text,
+        artifacts=list(result.artifacts),
+        trace=list(result.trace),
+        metrics=result.metrics,
+        grader_results=merged_graders,
+        failure_origin=result.failure_origin,
+        infra_error_code=result.infra_error_code,
+        infra_error_details=result.infra_error_details,
+    )
+
+
+async def _regrade_results(
+    results: list[RunResult],
+    tasks: list[Task],
+    judge_llm: Any | None,
+    source_output_dir: str,
+) -> list[RunResult]:
+    task_map = {task.id: task for task in tasks}
+    regraded: list[RunResult] = []
+    for result in results:
+        task = task_map.get(result.task_id)
+        if task is None:
+            raise ValueError(f"Unknown task in results: {result.task_id}")
+        regraded.append(await _regrade_result(result, task, judge_llm, source_output_dir))
+    return regraded
+
+
+def _write_results_jsonl(results: list[RunResult], output_dir: str) -> None:
+    data_dir = Path(output_dir) / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    runs_path = data_dir / "runs.jsonl"
+    with runs_path.open("w", encoding="utf-8") as handle:
+        for result in results:
+            handle.write(json.dumps(run_result_to_dict(result)) + "\n")
 
 
 # ─── Commands ───
@@ -395,40 +605,38 @@ def _report_command(
     rc: RuntimeConfig,
     project_root: Path,
 ) -> None:
-    from .config.providers import parse_model_spec
     from .task import load_tasks
-    from .types import run_result_from_dict
 
     input_path = args.input
-    inferred_output_dir = os.path.dirname(input_path)
-    if os.path.basename(input_path) == "runs.jsonl" and os.path.basename(inferred_output_dir) == "data":
-        inferred_output_dir = os.path.dirname(inferred_output_dir)
-    output_dir = args.output or inferred_output_dir
+    source_output_dir, output_dir = _infer_report_dirs(input_path, args.output)
 
     with open(input_path) as f:
         results = [run_result_from_dict(json.loads(line)) for line in f if line.strip()]
 
     tasks = load_tasks(os.path.join(project_root, "tasks"))
-
+    judge_model_spec = _resolve_report_judge_model_spec(args, eval_yaml)
     unique_models = sorted(set(r.model for r in results))
-    model_specs = [parse_model_spec(m) for m in unique_models]
+    from .config.providers import parse_model_spec
 
-    judge_model_str = args.judge_model
-    if judge_model_str:
-        judge_model_spec = parse_model_spec(judge_model_str)
-    elif eval_yaml.get("judge_model"):
-        judge_model_spec = _judge_spec_from_yaml(eval_yaml["judge_model"])
-    elif model_specs:
-        judge_model_spec = model_specs[0]
-    else:
-        judge_model_spec = parse_model_spec("unknown:unknown")
+    model_specs = [parse_model_spec(m) for m in unique_models]
+    result_task_ids = {result.task_id for result in results}
+    relevant_tasks = [task for task in tasks if task.id in result_task_ids]
 
     providers = rc.providers if rc is not None else {}
-    judge_provider = providers.get(judge_model_spec.provider)
-    judge_llm = create_judge_llm(judge_model_spec, judge_provider) if judge_provider else None
+    judge_llm = None
+    if args.regrade:
+        if judge_model_spec is None and any(_result_has_rubric_judge(task) for task in relevant_tasks):
+            raise ValueError("report --regrade requires judge_model in config or --judge-model")
+        if judge_model_spec is not None and any(_result_has_rubric_judge(task) for task in relevant_tasks):
+            judge_provider = providers.get(judge_model_spec.provider)
+            if judge_provider is None:
+                raise ValueError(f'No provider "{judge_model_spec.provider}" configured for report regrade')
+            judge_llm = create_judge_llm(judge_model_spec, judge_provider, rc)
+        print("Regrading replayable graders from persisted results...")
+        results = asyncio.run(_regrade_results(results, relevant_tasks, judge_llm, source_output_dir))
 
     config = EvalConfig(
-        model_spec=model_specs[0] if model_specs else parse_model_spec("unknown:unknown"),
+        model_spec=model_specs[0] if model_specs else ModelSpec(provider="unknown", model="unknown"),
         models=model_specs,
         harnesses=sorted(set(r.harness for r in results)),
         runs_per_task=1,
@@ -441,7 +649,8 @@ def _report_command(
 
     from .reports.generate import generate_reports
 
-    generate_reports(results, tasks, config, judge_llm, runtime_config=rc)
+    _write_results_jsonl(results, output_dir)
+    generate_reports(results, tasks, config, None, runtime_config=rc)
     print(f"Reports generated in {output_dir}")
 
 

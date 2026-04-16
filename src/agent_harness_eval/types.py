@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from .config.providers import ModelSpec, ProviderConfig
-from .graders.specs import GraderResult, grader_result_from_dict
+from .graders.specs import GraderResult, RubricDimensionResult, grader_result_from_dict
 
 TraceEventType = Literal[
     "message",
@@ -123,3 +123,79 @@ def run_result_from_dict(data: dict[str, Any]) -> RunResult:
         infra_error_code=data.get("infra_error_code"),
         infra_error_details=data.get("infra_error_details"),
     )
+
+
+def trace_event_to_dict(event: CanonicalTraceEvent) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in {
+            "type": event.type,
+            "ts": event.ts,
+            "role": event.role,
+            "text": event.text,
+            "tool_name": event.tool_name,
+            "input": event.input,
+            "success": event.success,
+            "output": event.output,
+            "path": event.path,
+            "error": event.error,
+        }.items()
+        if value is not None
+    }
+
+
+def grader_result_to_dict(result: GraderResult) -> dict[str, Any]:
+    data: dict[str, Any] = {
+        "grader_type": result.grader_type,
+        "name": result.name,
+        "pass": result.passed,
+    }
+    if result.score is not None:
+        data["score"] = result.score
+    if result.details is not None:
+        data["details"] = result.details
+    if result.dimensions is not None:
+        data["dimensions"] = [_rubric_dimension_to_dict(dim) for dim in result.dimensions]
+    return data
+
+
+def _rubric_dimension_to_dict(dim: RubricDimensionResult) -> dict[str, Any]:
+    return {
+        "name": dim.name,
+        "pass": dim.passed,
+        "score": dim.score,
+        "reason": dim.reason,
+        "required": dim.required,
+        "weight": dim.weight,
+    }
+
+
+def run_result_to_dict(result: RunResult) -> dict[str, Any]:
+    return {
+        "task_id": result.task_id,
+        "harness": result.harness,
+        "run_id": result.run_id,
+        "run_index": result.run_index,
+        "model": result.model,
+        "status": result.status,
+        "final_text": result.final_text,
+        "artifacts": list(result.artifacts),
+        "trace": [trace_event_to_dict(event) for event in result.trace],
+        "metrics": {
+            "latency_sec": result.metrics.latency_sec,
+            "input_tokens": result.metrics.input_tokens,
+            "output_tokens": result.metrics.output_tokens,
+            "cache_read_tokens": result.metrics.cache_read_tokens,
+            "cache_write_tokens": result.metrics.cache_write_tokens,
+            "total_tokens": result.metrics.total_tokens,
+            "cost_usd": result.metrics.cost_usd,
+            "cost_usd_no_cache": result.metrics.cost_usd_no_cache,
+            "tool_calls": result.metrics.tool_calls,
+            "turns": result.metrics.turns,
+            "metrics_estimated": result.metrics.metrics_estimated,
+        },
+        "grader_results": [grader_result_to_dict(grader) for grader in result.grader_results],
+        "failure_origin": result.failure_origin,
+        "infra_error_code": result.infra_error_code,
+        "infra_error_details": result.infra_error_details,
+    }

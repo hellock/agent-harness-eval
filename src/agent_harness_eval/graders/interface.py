@@ -51,41 +51,8 @@ async def run_graders(
     Auto-injects boundary_respected trajectory checks for any disabled
     tool_boundary constraints not already covered by an explicit grader.
     """
-    specs = list(task.graders)
-
-    # Failed / N/A runs usually carry stderr / bootstrap logs in
-    # ``final_text`` (see ``adapters.interface._make_result``), not the
-    # agent's answer. Text-based graders would then score that log dump as
-    # if it were a response, producing spurious passes — observed in the
-    # v2 rerun on a zeroclaw provider_api_error run.
-    #
-    # Timeouts are different: several adapters recover a partial assistant
-    # answer from the trace/session file and store that in ``final_text``.
-    # Blanking timed-out runs caused deterministic false negatives in
-    # coding.01/openclaw: tests passed and the partial answer clearly said
-    # "Map", but regex graders saw an empty string. Preserve timed-out
-    # partial answers and only scrub unequivocal non-answer statuses.
-    if result.status in {"failed", "not_applicable"}:
-        result = replace(result, final_text="")
-
-    # Auto-inject boundary_respected checks for disabled constraints
-    boundary = task.tool_boundary
-    if boundary:
-        existing_constraints: set[str] = set()
-        for s in specs:
-            if isinstance(s, TrajectoryGrader) and s.rule.kind == "boundary_respected" and s.rule.constraint:
-                existing_constraints.add(s.rule.constraint)
-
-        for constraint_name in ("internet", "shell", "file_write"):
-            if boundary.is_disabled(constraint_name) and constraint_name not in existing_constraints:
-                specs.append(
-                    TrajectoryGrader(
-                        rule=TrajectoryRule(
-                            kind="boundary_respected",
-                            constraint=constraint_name,  # type: ignore[arg-type]
-                        ),
-                    )
-                )
+    result = normalize_result_for_grading(result)
+    specs = expand_grader_specs(task)
 
     async def _run_one(spec: GraderSpec) -> GraderResult:
         try:
@@ -104,7 +71,7 @@ async def run_graders(
                 return gr
             return GraderResult(
                 grader_type=spec.type,
-                name=_grader_name(spec),
+                name=grader_name(spec),
                 passed=False,
                 score=0.0,
                 details="Grader returned None",
@@ -113,7 +80,7 @@ async def run_graders(
             logger.error("Grader %s failed: %s", spec.type, exc, exc_info=True)
             return GraderResult(
                 grader_type=spec.type,
-                name=_grader_name(spec),
+                name=grader_name(spec),
                 passed=False,
                 score=0.0,
                 details=f"Grader error: {exc}",
@@ -143,7 +110,7 @@ async def run_graders(
         placeholder_results = [
             GraderResult(
                 grader_type=spec.type,
-                name=_grader_name(spec),
+                name=grader_name(spec),
                 passed=False,
                 score=0.0,
                 details=skip_reason,
@@ -222,7 +189,51 @@ async def _dispatch_grader(
             return None
 
 
-def _grader_name(spec: GraderSpec) -> str:
+def normalize_result_for_grading(result: RunResult) -> RunResult:
+    """Strip unequivocal non-answer final_text before grading."""
+    # Failed / N/A runs usually carry stderr / bootstrap logs in
+    # ``final_text`` (see ``adapters.interface._make_result``), not the
+    # agent's answer. Text-based graders would then score that log dump as
+    # if it were a response, producing spurious passes — observed in the
+    # v2 rerun on a zeroclaw provider_api_error run.
+    #
+    # Timeouts are different: several adapters recover a partial assistant
+    # answer from the trace/session file and store that in ``final_text``.
+    # Blanking timed-out runs caused deterministic false negatives in
+    # coding.01/openclaw: tests passed and the partial answer clearly said
+    # "Map", but regex graders saw an empty string. Preserve timed-out
+    # partial answers and only scrub unequivocal non-answer statuses.
+    if result.status in {"failed", "not_applicable"}:
+        return replace(result, final_text="")
+    return result
+
+
+def expand_grader_specs(task: Task) -> list[GraderSpec]:
+    """Return task graders plus any auto-injected boundary checks."""
+    specs = list(task.graders)
+    boundary = task.tool_boundary
+    if not boundary:
+        return specs
+
+    existing_constraints: set[str] = set()
+    for spec in specs:
+        if isinstance(spec, TrajectoryGrader) and spec.rule.kind == "boundary_respected" and spec.rule.constraint:
+            existing_constraints.add(spec.rule.constraint)
+
+    for constraint_name in ("internet", "shell", "file_write"):
+        if boundary.is_disabled(constraint_name) and constraint_name not in existing_constraints:
+            specs.append(
+                TrajectoryGrader(
+                    rule=TrajectoryRule(
+                        kind="boundary_respected",
+                        constraint=constraint_name,  # type: ignore[arg-type]
+                    )
+                )
+            )
+    return specs
+
+
+def grader_name(spec: GraderSpec) -> str:
     """Generate a human-readable name for a grader spec."""
     match spec:
         case TrajectoryGrader(rule=rule):

@@ -221,8 +221,14 @@ agent-harness-eval run --config eval.local.yaml --model openai:gpt-5.4
 # 多模型矩阵
 agent-harness-eval run --config eval.local.yaml --model anthropic:claude-sonnet-4-6,openai:gpt-5.4
 
-# 从已有结果重新生成报告
+# 从已有结果重新生成报告（默认不会重新跑 grader）
 agent-harness-eval report --config eval.local.yaml --input results/<run-dir>/data/runs.jsonl
+
+# 先重跑可重放的 grader，再重建报告
+agent-harness-eval report --config eval.local.yaml --input results/<run-dir>/data/runs.jsonl --regrade
+
+# 仅在 --regrade 时覆盖 judge model
+agent-harness-eval report --config eval.local.yaml --input results/<run-dir>/data/runs.jsonl --regrade --judge-model openai:gpt-5.4
 ```
 
 ### CLI 选项

@@ -1,15 +1,26 @@
 from __future__ import annotations
 
 import argparse
+import json
+import shutil
+import tempfile
 from pathlib import Path
 
 import pytest
 
-from agent_harness_eval.cli import _build_run_eval_config, _load_config, _run_preflight_phase
+from agent_harness_eval.cli import (
+    _build_run_eval_config,
+    _load_config,
+    _regrade_results,
+    _resolve_report_judge_model_spec,
+    _run_preflight_phase,
+)
 from agent_harness_eval.config.eval_file import clear_cache
 from agent_harness_eval.config.providers import ModelSpec, ProviderConfig
 from agent_harness_eval.config.runtime import RuntimeConfig
-from agent_harness_eval.types import EvalConfig
+from agent_harness_eval.graders.specs import GraderResult, RegexGrader, RubricJudgeGrader, TestPassGrader
+from agent_harness_eval.task import Task
+from agent_harness_eval.types import EvalConfig, RunMetrics, RunResult
 
 
 def _make_args(**overrides: object) -> argparse.Namespace:
@@ -26,9 +37,19 @@ def _make_args(**overrides: object) -> argparse.Namespace:
         "output": None,
         "timeout": None,
         "reinstall": False,
+        "regrade": False,
     }
     data.update(overrides)
     return argparse.Namespace(**data)
+
+
+@pytest.fixture
+def isolated_temp_dir() -> Path:
+    root = Path(tempfile.mkdtemp(prefix="agent-harness-eval-cli-test-"))
+    try:
+        yield root
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
 
 
 def test_build_run_eval_config_cli_overrides_yaml_defaults() -> None:
@@ -270,3 +291,71 @@ async def test_run_preflight_phase_exits_when_judge_preflight_fails(tmp_path: Pa
         )
 
     assert exc_info.value.code == 1
+
+
+def test_resolve_report_judge_model_spec_uses_config_when_not_regrading() -> None:
+    args = _make_args()
+    eval_yaml = {"judge_model": {"provider": "anthropic", "model": "claude-sonnet-4-6"}}
+
+    judge_spec = _resolve_report_judge_model_spec(args, eval_yaml)
+
+    assert judge_spec == ModelSpec(provider="anthropic", model="claude-sonnet-4-6")
+
+
+def test_resolve_report_judge_model_spec_rejects_override_without_regrade() -> None:
+    args = _make_args(judge_model="openai:gpt-5.4")
+
+    with pytest.raises(ValueError, match="requires --regrade"):
+        _resolve_report_judge_model_spec(args, {"judge_model": {"provider": "anthropic", "model": "claude-sonnet-4-6"}})
+
+
+@pytest.mark.asyncio
+async def test_regrade_results_reruns_replayable_graders_and_preserves_workspace_dependent_results(
+    isolated_temp_dir: Path,
+) -> None:
+    task = Task(
+        id="reasoning.01",
+        category="reasoning",
+        description="task",
+        user_query="answer",
+        graders=[
+            RegexGrader(pattern="updated"),
+            TestPassGrader(command="pytest -q"),
+            RubricJudgeGrader(rubric="Check whether the answer says updated."),
+        ],
+        timeout_sec=30,
+    )
+    result = RunResult(
+        task_id="reasoning.01",
+        harness="codex",
+        run_id="run-1",
+        run_index=0,
+        model="openai:gpt-5.4",
+        status="completed",
+        final_text="updated answer",
+        metrics=RunMetrics(),
+        grader_results=[
+            GraderResult(grader_type="regex", name="regex:old", passed=False, score=0.0),
+            GraderResult(grader_type="test_pass", name="test_pass:pytest -q", passed=True, score=1.0),
+            GraderResult(grader_type="rubric_judge", name="rubric_judge", passed=False, score=0.0),
+        ],
+    )
+
+    class _Judge:
+        async def generate(self, prompt: str) -> str:
+            assert "updated answer" in prompt
+            return json.dumps(
+                {
+                    "pass": True,
+                    "score": 1.0,
+                    "reason": "ok",
+                    "dimensions": [],
+                }
+            )
+
+    regraded = await _regrade_results([result], [task], _Judge(), str(isolated_temp_dir))
+
+    grader_map = {grader.name: grader for grader in regraded[0].grader_results}
+    assert grader_map["regex:updated"].passed is True
+    assert grader_map["rubric_judge"].passed is True
+    assert grader_map["test_pass:pytest -q"].passed is True
