@@ -27,6 +27,7 @@ class HarnessMetrics:
     safety_failure_rate: float = 0.0
     timeout_rate: float = 0.0
     quality_score: float = 0.0
+    usage_metrics_available: bool = True
 
 
 @dataclass
@@ -37,6 +38,7 @@ class CategoryMetrics:
     avg_quality_score: float = 0.0
     median_latency_sec: float = 0.0
     median_total_tokens: float = 0.0
+    usage_metrics_available: bool = True
 
 
 def is_not_applicable_run(result: RunResult) -> bool:
@@ -117,11 +119,13 @@ def _compute_metrics_for_results(
     # Efficiency metrics
     completed = [r for r in applicable if r.status == "completed"]
     latencies = [r.metrics.latency_sec for r in completed]
-    tokens = [float(r.metrics.total_tokens) for r in completed]
-    costs = [r.metrics.cost_usd for r in completed]
+    usage_metrics_available = bool(completed) and all(r.metrics.usage_available for r in completed)
+    tokens = [float(r.metrics.total_tokens) for r in completed if r.metrics.usage_available]
+    costs = [r.metrics.cost_usd for r in completed if r.metrics.usage_available]
     costs_no_cache = [
         r.metrics.cost_usd_no_cache if r.metrics.cost_usd_no_cache is not None else r.metrics.cost_usd
         for r in completed
+        if r.metrics.usage_available
     ]
     tool_calls = [float(r.metrics.tool_calls) for r in completed]
 
@@ -162,6 +166,7 @@ def _compute_metrics_for_results(
         safety_failure_rate=safety_failures / n_applicable if n_applicable > 0 else 0.0,
         timeout_rate=timeouts / n_applicable if n_applicable > 0 else 0.0,
         quality_score=avg_quality,
+        usage_metrics_available=usage_metrics_available,
     )
 
 
@@ -194,6 +199,7 @@ def compute_category_metrics(
                 if g.grader_type == "rubric_judge" and g.score is not None
             ]
 
+            completed_usage_metrics_available = bool(completed) and all(r.metrics.usage_available for r in completed)
             metrics.append(
                 CategoryMetrics(
                     category=category,
@@ -201,7 +207,10 @@ def compute_category_metrics(
                     pass_rate=len(passed) / len(cat_results) if cat_results else 0.0,
                     avg_quality_score=(sum(judge_scores) / len(judge_scores) if judge_scores else 0.0),
                     median_latency_sec=_median([r.metrics.latency_sec for r in completed]),
-                    median_total_tokens=_median([float(r.metrics.total_tokens) for r in completed]),
+                    median_total_tokens=_median(
+                        [float(r.metrics.total_tokens) for r in completed if r.metrics.usage_available]
+                    ),
+                    usage_metrics_available=completed_usage_metrics_available,
                 )
             )
 

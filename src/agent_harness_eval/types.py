@@ -47,11 +47,11 @@ class RunMetrics:
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
     total_tokens: int = 0
+    usage_available: bool = True
     cost_usd: float = 0.0
     cost_usd_no_cache: float | None = None
     tool_calls: int = 0
     turns: int = 0
-    metrics_estimated: bool | None = None
 
 
 FailureOrigin = Literal["agent", "adapter", "provider", "sandbox", "grader", "unknown"]
@@ -188,11 +188,11 @@ def run_result_to_dict(result: RunResult) -> dict[str, Any]:
             "cache_read_tokens": result.metrics.cache_read_tokens,
             "cache_write_tokens": result.metrics.cache_write_tokens,
             "total_tokens": result.metrics.total_tokens,
+            "usage_available": result.metrics.usage_available,
             "cost_usd": result.metrics.cost_usd,
             "cost_usd_no_cache": result.metrics.cost_usd_no_cache,
             "tool_calls": result.metrics.tool_calls,
             "turns": result.metrics.turns,
-            "metrics_estimated": result.metrics.metrics_estimated,
         },
         "grader_results": [grader_result_to_dict(grader) for grader in result.grader_results],
         "failure_origin": result.failure_origin,

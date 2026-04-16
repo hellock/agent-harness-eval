@@ -67,8 +67,8 @@ def generate_case_review_report(results: list[RunResult]) -> str:
                 # Metrics
                 lines.append(
                     f"- Latency: {format_latency_cell(r.metrics.latency_sec)} | "
-                    f"Tokens: {format_token_cell(float(r.metrics.total_tokens))} | "
-                    f"Cost: {format_cost_cell(r.metrics.cost_usd)} | "
+                    f"Tokens: {format_token_cell(float(r.metrics.total_tokens), available=r.metrics.usage_available)} | "
+                    f"Cost: {format_cost_cell(r.metrics.cost_usd, available=r.metrics.usage_available)} | "
                     f"Tools: {r.metrics.tool_calls}"
                 )
 

@@ -210,6 +210,7 @@ class ZeroClawAdapter(HarnessAdapter):
                     cache_read_tokens=usage["cache_read"],
                     cache_write_tokens=usage["cache_write"],
                     total_tokens=usage["total"],
+                    usage_available=False,
                     cost_usd=calculate_cost(
                         model,
                         usage["input"],
@@ -260,6 +261,7 @@ class ZeroClawAdapter(HarnessAdapter):
                     cache_read_tokens=usage["cache_read"],
                     cache_write_tokens=usage["cache_write"],
                     total_tokens=usage["total"],
+                    usage_available=False,
                     cost_usd=calculate_cost(
                         model,
                         usage["input"],
@@ -331,6 +333,7 @@ class ZeroClawAdapter(HarnessAdapter):
                     cache_read_tokens=usage["cache_read"],
                     cache_write_tokens=usage["cache_write"],
                     total_tokens=usage["total"],
+                    usage_available=False,
                     cost_usd=calculate_cost(
                         model,
                         usage["input"],

@@ -58,7 +58,7 @@ def generate_category_report(
                     format_pass_cell(cm.pass_rate),
                     f"{cm.avg_quality_score:.2f}",
                     format_latency_cell(cm.median_latency_sec),
-                    format_token_cell(cm.median_total_tokens),
+                    format_token_cell(cm.median_total_tokens, available=cm.usage_metrics_available),
                 ]
             )
 

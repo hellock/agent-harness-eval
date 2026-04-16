@@ -266,8 +266,6 @@ def _section_per_model_headline(
         if hm is None:
             continue
         metric_by_model[m.label] = hm
-        model_results = [r for r in results if r.model == m.label and r.harness == harness]
-        estimated = any(r.metrics.metrics_estimated for r in model_results if r.metrics.metrics_estimated)
         row = [f"`{m.label}`", format_pass_cell(hm.pass_at_1)]
         if multi_run:
             row.append(format_pass_cell(hm.pass_at_3) if hm.pass_at_3 > 0 else "—")
@@ -275,9 +273,12 @@ def _section_per_model_headline(
             [
                 f"{hm.quality_score:.2f}",
                 format_latency_cell(hm.mean_latency_sec),
-                format_token_cell(hm.mean_total_tokens),
-                format_cost_cell(hm.mean_cost_usd, estimated=estimated),
-                format_cost_cell(hm.mean_cost_usd_no_cache, estimated=estimated),
+                format_token_cell(hm.mean_total_tokens, available=hm.usage_metrics_available),
+                format_cost_cell(hm.mean_cost_usd, available=hm.usage_metrics_available),
+                format_cost_cell(
+                    hm.mean_cost_usd_no_cache,
+                    available=hm.usage_metrics_available,
+                ),
                 f"{hm.mean_tool_calls:.1f}",
                 format_pass_cell(hm.timeout_rate),
             ]
@@ -309,10 +310,14 @@ def _section_per_model_headline(
             else:
                 runner_label, _runner = ranked[1]
                 cost_note = ""
-                eligible = [(label, m.mean_cost_usd) for label, m in metric_by_model.items() if m.mean_cost_usd > 0]
+                eligible = [
+                    (label, m.mean_cost_usd)
+                    for label, m in metric_by_model.items()
+                    if m.usage_metrics_available and m.mean_cost_usd > 0
+                ]
                 if eligible:
                     cheapest_label, cheapest_cost = min(eligible, key=lambda kv: kv[1])
-                    if cheapest_label != winner_label and winner.mean_cost_usd > 0:
+                    if cheapest_label != winner_label and winner.usage_metrics_available and winner.mean_cost_usd > 0:
                         ratio = winner.mean_cost_usd / cheapest_cost
                         if ratio >= 1.5:
                             cost_note = f" `{cheapest_label}` cost ~{ratio:.1f}x less per run."

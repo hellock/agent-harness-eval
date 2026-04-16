@@ -350,17 +350,18 @@ async def _execute_and_grade(
     result.run_index = run_index
 
     # Normalize total_tokens centrally — always in + out + cache_read + cache_write.
-    expected_total = (
-        result.metrics.input_tokens
-        + result.metrics.output_tokens
-        + result.metrics.cache_read_tokens
-        + result.metrics.cache_write_tokens
-    )
-    if expected_total > 0:
-        result.metrics.total_tokens = expected_total
+    if result.metrics.usage_available:
+        expected_total = (
+            result.metrics.input_tokens
+            + result.metrics.output_tokens
+            + result.metrics.cache_read_tokens
+            + result.metrics.cache_write_tokens
+        )
+        if expected_total > 0:
+            result.metrics.total_tokens = expected_total
 
     # Compute cost centrally — adapters only need to populate token counts.
-    if result.metrics.cost_usd == 0.0 and result.metrics.total_tokens > 0:
+    if result.metrics.usage_available and result.metrics.cost_usd == 0.0 and result.metrics.total_tokens > 0:
         from .utils.cost import calculate_cost
 
         result.metrics.cost_usd = calculate_cost(
@@ -372,14 +373,17 @@ async def _execute_and_grade(
             pricing=pricing_override,
         )
 
-    result.metrics.cost_usd_no_cache = calculate_cost_no_cache(
-        model_label,
-        result.metrics.input_tokens,
-        result.metrics.output_tokens,
-        result.metrics.cache_read_tokens,
-        result.metrics.cache_write_tokens,
-        pricing=pricing_override,
-    )
+    if result.metrics.usage_available:
+        result.metrics.cost_usd_no_cache = calculate_cost_no_cache(
+            model_label,
+            result.metrics.input_tokens,
+            result.metrics.output_tokens,
+            result.metrics.cache_read_tokens,
+            result.metrics.cache_write_tokens,
+            pricing=pricing_override,
+        )
+    else:
+        result.metrics.cost_usd_no_cache = None
 
     adapter.executor.restore_workspace(prepared.workspace_dir)
     grader_env = _build_prepare_command_env(prepared) if prepared else None
@@ -395,7 +399,7 @@ async def _execute_and_grade(
     )
 
     if (
-        not result.metrics.metrics_estimated
+        result.metrics.usage_available
         and result.metrics.total_tokens > 0
         and result.metrics.total_tokens < SUSPICIOUS_LOW_TOKEN_THRESHOLD
         and result.metrics.latency_sec > 10

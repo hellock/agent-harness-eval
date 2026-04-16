@@ -30,6 +30,7 @@ def _make_result(
     harness: str = "codex",
     model: str = "openai:gpt-5.4",
     passed: bool = True,
+    usage_available: bool = True,
 ) -> RunResult:
     return RunResult(
         task_id=task_id,
@@ -39,7 +40,13 @@ def _make_result(
         model=model,
         status="completed",
         final_text="done",
-        metrics=RunMetrics(latency_sec=2.0, total_tokens=1200, cost_usd=0.12, tool_calls=3),
+        metrics=RunMetrics(
+            latency_sec=2.0,
+            total_tokens=1200,
+            usage_available=usage_available,
+            cost_usd=0.12,
+            tool_calls=3,
+        ),
         grader_results=[
             GraderResult(
                 grader_type="test_pass",
@@ -137,3 +144,28 @@ def test_generate_reports_skips_judge_analysis_without_judge_model(
     assert (output_dir / "reports" / "summary.md").is_file()
     summary = (output_dir / "reports" / "summary.md").read_text(encoding="utf-8")
     assert "## 5. Judge Summary" not in summary
+
+
+def test_generate_reports_render_na_for_unavailable_token_and_cost_metrics(
+    isolated_temp_dir: Path,
+) -> None:
+    output_dir = isolated_temp_dir / "reports-na"
+    model = ModelSpec(provider="openai", model="gpt-5.4")
+    config = EvalConfig(
+        model_spec=model,
+        models=[model],
+        harnesses=["zeroclaw"],
+        runs_per_task=1,
+        output_dir=str(output_dir),
+        timeout_sec=30,
+    )
+    tasks = [Task(id="coding.01", category="coding", description="task", user_query="answer", timeout_sec=30)]
+    results = [_make_result(harness="zeroclaw", passed=True, usage_available=False)]
+
+    generate_reports(results, tasks, config, judge_llm=None, runtime_config=None)
+
+    summary = (output_dir / "reports" / "summary.md").read_text(encoding="utf-8")
+    case_review = (output_dir / "reports" / "case-review.md").read_text(encoding="utf-8")
+
+    assert "N/A" in summary
+    assert "Tokens: N/A | Cost: N/A" in case_review

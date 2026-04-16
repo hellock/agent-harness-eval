@@ -17,6 +17,7 @@ def _make_run(
     infra_error_code: str | None = None,
     latency_sec: float = 1.0,
     total_tokens: int = 10,
+    usage_available: bool = True,
     cost_usd: float = 0.1,
     tool_calls: int = 1,
     quality_score: float | None = None,
@@ -52,6 +53,7 @@ def _make_run(
         metrics=RunMetrics(
             latency_sec=latency_sec,
             total_tokens=total_tokens,
+            usage_available=usage_available,
             cost_usd=cost_usd,
             tool_calls=tool_calls,
         ),
@@ -120,3 +122,23 @@ def test_compute_category_metrics_keeps_harnesses_and_categories_separate() -> N
     assert by_key[("codex", "coding")].median_latency_sec == 3.0
     assert by_key[("codex", "security")].pass_rate == 0.0
     assert by_key[("zeroclaw", "coding")].median_total_tokens == 50.0
+
+
+def test_compute_metrics_marks_unavailable_token_and_cost_series() -> None:
+    results = [
+        _make_run(
+            task_id="task.a",
+            harness="zeroclaw",
+            run_index=1,
+            passed=True,
+            total_tokens=50,
+            usage_available=False,
+            cost_usd=0.2,
+        ),
+    ]
+
+    harness_metrics = compute_harness_metrics(results, ["zeroclaw"])[0]
+    category_metrics = compute_category_metrics(results, [{"id": "task.a", "category": "coding"}], ["zeroclaw"])[0]
+
+    assert harness_metrics.usage_metrics_available is False
+    assert category_metrics.usage_metrics_available is False

@@ -108,13 +108,6 @@ def _section_results(
 
     rows: list[list[str]] = []
     for metric in metrics:
-        estimated = False
-        if results:
-            harness_results = [result for result in results if result.harness == metric.harness]
-            estimated = any(
-                result.metrics.metrics_estimated for result in harness_results if result.metrics.metrics_estimated
-            )
-
         row = [format_harness_name(metric.harness), format_pass_cell(metric.pass_at_1)]
         if multi_run:
             row.append(format_pass_cell(metric.pass_at_3) if metric.pass_at_3 > 0 else "—")
@@ -122,9 +115,12 @@ def _section_results(
             [
                 f"{metric.quality_score:.2f}",
                 format_latency_cell(metric.mean_latency_sec),
-                format_token_cell(metric.mean_total_tokens),
-                format_cost_cell(metric.mean_cost_usd, estimated=estimated),
-                format_cost_cell(metric.mean_cost_usd_no_cache, estimated=estimated),
+                format_token_cell(metric.mean_total_tokens, available=metric.usage_metrics_available),
+                format_cost_cell(metric.mean_cost_usd, available=metric.usage_metrics_available),
+                format_cost_cell(
+                    metric.mean_cost_usd_no_cache,
+                    available=metric.usage_metrics_available,
+                ),
                 f"{metric.mean_tool_calls:.1f}",
                 format_pass_cell(metric.timeout_rate),
             ]
@@ -242,7 +238,7 @@ def _section_category_breakdown(
                     format_pass_cell(item.pass_rate),
                     f"{item.avg_quality_score:.2f}",
                     format_latency_cell(item.median_latency_sec),
-                    format_token_cell(item.median_total_tokens),
+                    format_token_cell(item.median_total_tokens, available=item.usage_metrics_available),
                 ]
             )
             if best is None or item.pass_rate > best[1]:

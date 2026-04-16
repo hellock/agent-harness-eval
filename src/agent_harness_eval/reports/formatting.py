@@ -10,10 +10,11 @@ def format_harness_name(name: str) -> str:
     return " ".join(word.capitalize() for word in name.replace("-", " ").replace("_", " ").split())
 
 
-def format_cost_cell(cost: float, estimated: bool = False, decimals: int = 4) -> str:
+def format_cost_cell(cost: float, decimals: int = 4, available: bool = True) -> str:
     """Format cost."""
-    prefix = "~" if estimated else ""
-    return f"{prefix}${cost:.{decimals}f}"
+    if not available:
+        return "N/A"
+    return f"${cost:.{decimals}f}"
 
 
 def format_latency_cell(seconds: float) -> str:
@@ -26,8 +27,10 @@ def format_pass_cell(pass_rate: float) -> str:
     return f"{pass_rate * 100:.1f}%"
 
 
-def format_token_cell(tokens: float) -> str:
+def format_token_cell(tokens: float, available: bool = True) -> str:
     """Format token count (e.g., '12.3k')."""
+    if not available:
+        return "N/A"
     if tokens < 1000:
         return str(int(tokens))
     if tokens < 1_000_000:
