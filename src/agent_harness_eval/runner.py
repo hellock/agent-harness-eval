@@ -258,22 +258,23 @@ async def _finalize_prepared_run(
 ) -> None:
     """Persist debug artifacts and clean up the workspace.
 
-    The sync filesystem work (``shutil.copytree`` for debug artifacts,
-    ``shutil.rmtree`` inside ``adapter.cleanup``) is offloaded to the default
-    thread pool so it doesn't block the event loop while other concurrent runs
-    are active.
+    Keep finalization synchronous. In this environment, ``asyncio.to_thread()``
+    leaves the event loop hanging during shutdown, and cleanup routines also
+    shell out (for example ``lsof``/``chmod`` in ``remove_workspace``). The
+    filesystem work here is bounded and happens after the run has finished, so
+    correctness is preferable to avoiding a short event-loop stall.
     """
     if not prepared:
         return
 
-    await asyncio.to_thread(_persist_debug_artifacts, prepared, trace_dir)
+    _persist_debug_artifacts(prepared, trace_dir)
 
     any_fail = result.status != "completed" or any(not grader.passed for grader in result.grader_results)
     should_keep = keep_workspace == "always" or (keep_workspace == "on_failure" and any_fail)
 
     if not should_keep:
         try:
-            await asyncio.to_thread(adapter.cleanup, prepared)
+            adapter.cleanup(prepared)
         except Exception:
             pass
         return
@@ -296,11 +297,11 @@ async def _prepare_run(
 ) -> PreparedRun:
     """Prepare the workspace: adapter.prepare + prepare_commands.
 
-    ``adapter.prepare`` is sync and can do heavy filesystem work (``shutil.copytree``,
-    many ``mkdir``/file writes for ``workspace_files``). Offloading to a thread keeps
-    the event loop responsive while other concurrent runs progress.
+    Keep workspace preparation synchronous. ``adapter.prepare`` does local
+    filesystem work only, and using ``asyncio.to_thread()`` here causes loop
+    shutdown hangs in this environment.
     """
-    prepared = await asyncio.to_thread(adapter.prepare, task, run_id)
+    prepared = adapter.prepare(task, run_id)
 
     if task.prepare_commands:
         await _run_prepare_commands(

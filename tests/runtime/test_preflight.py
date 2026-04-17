@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import asyncio
+import json
+import shutil
+import tempfile
 from collections.abc import Callable
 from pathlib import Path
 
@@ -9,7 +13,7 @@ from agent_harness_eval.adapters.interface import HarnessAdapter, PreparedRun, V
 from agent_harness_eval.config.providers import ModelSpec, ProviderConfig
 from agent_harness_eval.config.runtime import RuntimeConfig
 from agent_harness_eval.executor import ExecutionPolicy, Executor, policy_from_task
-from agent_harness_eval.preflight import run_harness_preflight
+from agent_harness_eval.preflight import run_harness_preflight, write_preflight_artifacts
 from agent_harness_eval.task import Task
 from agent_harness_eval.types import CanonicalTraceEvent, EvalConfig, RunMetrics, RunResult
 from agent_harness_eval.utils.subprocess import SubprocessResult
@@ -22,6 +26,15 @@ _TEST_PROVIDERS = {
         api_format="openai-chat-completions",
     ),
 }
+
+
+@pytest.fixture
+def isolated_temp_dir() -> Path:
+    root = Path(tempfile.mkdtemp(prefix="agent-harness-eval-preflight-test-"))
+    try:
+        yield root
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
 
 
 class DummyExecutor(Executor):
@@ -286,6 +299,35 @@ async def test_preflight_fails_install_check() -> None:
 
 
 @pytest.mark.asyncio
+async def test_write_preflight_artifacts_persists_install_stdout_and_stderr(
+    isolated_temp_dir: Path,
+) -> None:
+    rc = RuntimeConfig(project_root=Path.cwd(), providers=_TEST_PROVIDERS)
+    adapter = ScriptedAdapter(rc, DummyExecutor(rc), [], install_ok=False)
+    config = _make_eval_config(harnesses=["scripted"])
+
+    payload = await run_harness_preflight(config, {"scripted": adapter}, rc)
+    write_preflight_artifacts(str(isolated_temp_dir), payload["results"])
+
+    preflight_json = json.loads((isolated_temp_dir / "data" / "preflight.json").read_text(encoding="utf-8"))
+    entry = preflight_json[0]
+    assert entry["stage"] == "install"
+    assert entry["artifacts"] is None
+
+    payload["results"][0].install_stdout = "install stdout\n"
+    payload["results"][0].install_stderr = "install stderr\n"
+    write_preflight_artifacts(str(isolated_temp_dir), payload["results"])
+
+    preflight_json = json.loads((isolated_temp_dir / "data" / "preflight.json").read_text(encoding="utf-8"))
+    entry = preflight_json[0]
+    assert len(entry["artifacts"]) == 2
+    stdout_path = isolated_temp_dir / entry["artifacts"][0]["path"]
+    stderr_path = isolated_temp_dir / entry["artifacts"][1]["path"]
+    assert stdout_path.read_text(encoding="utf-8") == "install stdout\n"
+    assert stderr_path.read_text(encoding="utf-8") == "install stderr\n"
+
+
+@pytest.mark.asyncio
 async def test_preflight_fails_install_check_when_custom_docker_image_lacks_verifier_runtime() -> None:
     rc = RuntimeConfig(
         project_root=Path.cwd(),
@@ -338,6 +380,57 @@ async def test_preflight_allows_custom_docker_image_without_python_runtime_requi
 
     assert payload["healthy_harnesses"] == ["scripted"]
     assert executor.calls == ["scripted", "bash"]
+
+
+@pytest.mark.asyncio
+async def test_preflight_recovers_after_custom_docker_install_failure() -> None:
+    def success(prepared: PreparedRun, model: str) -> RunResult:
+        return _completed_result(prepared.task.id, "ok")
+
+    failed_rc = RuntimeConfig(
+        project_root=Path.cwd(),
+        executor_backend="docker",
+        docker_image="python:3.12-slim",
+        providers=_TEST_PROVIDERS,
+    )
+    failed_executor = ScriptedDockerExecutor(
+        failed_rc,
+        {
+            "custom": SubprocessResult(stdout="custom 1.0.0\n", stderr="", exit_code=0, timed_out=False),
+            "bash": SubprocessResult(stdout="", stderr="bash: not found", exit_code=127, timed_out=False),
+        },
+    )
+    failed_adapter = InstallCheckingAdapter(failed_rc, failed_executor)
+
+    failed_payload = await run_harness_preflight(
+        _make_eval_config(harnesses=["custom"], models=[ModelSpec(provider="openai", model="gpt-5.4")]),
+        {"custom": failed_adapter},
+        failed_rc,
+    )
+    assert failed_payload["healthy_harnesses"] == []
+
+    passing_rc = RuntimeConfig(
+        project_root=Path.cwd(),
+        executor_backend="docker",
+        docker_image="debian:stable-slim",
+        providers=_TEST_PROVIDERS,
+    )
+    passing_executor = ScriptedDockerExecutor(
+        passing_rc,
+        {
+            "scripted": SubprocessResult(stdout="scripted 1.0.0\n", stderr="", exit_code=0, timed_out=False),
+            "bash": SubprocessResult(stdout="GNU bash 5.2\n", stderr="", exit_code=0, timed_out=False),
+        },
+    )
+    passing_adapter = InstallCheckingScriptedAdapter(passing_rc, passing_executor, success)
+
+    passing_payload = await asyncio.wait_for(
+        run_harness_preflight(_make_eval_config(harnesses=["scripted"]), {"scripted": passing_adapter}, passing_rc),
+        timeout=2,
+    )
+
+    assert passing_payload["healthy_harnesses"] == ["scripted"]
+    assert passing_executor.calls == ["scripted", "bash"]
 
 
 @pytest.mark.asyncio

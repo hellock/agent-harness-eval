@@ -177,7 +177,7 @@ def _detect_side_effects(workspace_dir: str) -> list[str]:
 
     # Check for eval-related orphan temp dirs
     try:
-        tmp_dir = Path(tempfile.gettempdir())
+        tmp_dir = Path(os.environ.get("TMPDIR") or os.environ.get("TEMP") or os.environ.get("TMP") or "/tmp")
         workspace_base = Path(workspace_dir).name
         orphan_count = sum(
             1

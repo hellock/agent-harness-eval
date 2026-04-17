@@ -51,6 +51,8 @@ class HarnessPreflightResult:
     trace_events: int = 0
     tool_calls: int = 0
     warnings: list[str] | None = None
+    install_stdout: str | None = None
+    install_stderr: str | None = None
 
 
 RETRYABLE_PROBE_CODES = {
@@ -172,6 +174,8 @@ async def run_harness_preflight(
                         code="install_check_failed",
                         details=install_result.error or "binary not found",
                         failure_origin="adapter",
+                        install_stdout=install_result.stdout,
+                        install_stderr=install_result.stderr,
                     )
                 )
             continue
@@ -424,7 +428,7 @@ async def _probe_harness(
         )
 
         try:
-            prepared = await asyncio.to_thread(adapter.prepare, per_run_task, run_id)
+            prepared = adapter.prepare(per_run_task, run_id)
         except Exception as error:
             detail = str(error)
             failure = detect_failure_origin_from_error(detail)
@@ -550,7 +554,7 @@ async def _probe_harness(
         finally:
             if prepared:
                 try:
-                    await asyncio.to_thread(adapter.cleanup, prepared)
+                    adapter.cleanup(prepared)
                 except Exception as cleanup_error:
                     results.append(
                         HarnessPreflightResult(
@@ -641,6 +645,8 @@ def write_preflight_artifacts(
 ) -> None:
     data_dir = os.path.join(output_dir, "data")
     os.makedirs(data_dir, exist_ok=True)
+    debug_dir = os.path.join(output_dir, "preflight", "_debug")
+    os.makedirs(debug_dir, exist_ok=True)
 
     data = [
         {
@@ -655,6 +661,7 @@ def write_preflight_artifacts(
             "trace_events": r.trace_events,
             "tool_calls": r.tool_calls,
             "warnings": r.warnings,
+            "artifacts": _persist_preflight_debug_artifacts(r, output_dir, debug_dir),
         }
         for r in results
     ]
@@ -672,3 +679,27 @@ def _pick_error_detail(result: RunResult) -> str:
     if task_failed and task_failed.error:
         return task_failed.error[:ERROR_DETAIL_MAX_CHARS]
     return result.final_text[:ERROR_DETAIL_MAX_CHARS]
+
+
+def _persist_preflight_debug_artifacts(
+    result: HarnessPreflightResult,
+    output_dir: str,
+    debug_dir: str,
+) -> list[dict[str, str]] | None:
+    artifacts: list[dict[str, str]] = []
+    stem = _slugify_preflight_artifact_name(f"{result.harness}-{result.stage}-{result.model}")
+    for stream_name, text in (("stdout", result.install_stdout), ("stderr", result.install_stderr)):
+        if not text:
+            continue
+        filename = f"{stem}.{stream_name}.txt"
+        path = os.path.join(debug_dir, filename)
+        with open(path, "w", encoding="utf-8", errors="replace") as handle:
+            handle.write(text)
+        artifacts.append({"path": os.path.relpath(path, output_dir), "stream": stream_name})
+    return artifacts or None
+
+
+def _slugify_preflight_artifact_name(value: str) -> str:
+    import re
+
+    return re.sub(r"[^A-Za-z0-9_.-]+", "-", value).strip(".-") or "preflight"

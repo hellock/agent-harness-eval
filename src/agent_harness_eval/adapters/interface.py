@@ -50,6 +50,8 @@ class VerifyInstallResult:
     ok: bool
     version: str | None = None
     error: str | None = None
+    stdout: str | None = None
+    stderr: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -262,11 +264,12 @@ class HarnessAdapter(ABC):
         both host and docker modes.
         """
         try:
-            import tempfile
-
             bin_path = self.resolve_binary()
             policy = ExecutionPolicy(
-                workspace_dir=tempfile.gettempdir(),
+                # Avoid ``tempfile.gettempdir()`` here: in this environment, calling it
+                # on the main thread can wedge later ``tempfile.mkdtemp()`` calls that
+                # run inside ``asyncio.to_thread()`` during workspace preparation.
+                workspace_dir=(os.environ.get("TMPDIR") or os.environ.get("TEMP") or os.environ.get("TMP") or "/tmp"),
                 timeout_sec=VERIFY_INSTALL_TIMEOUT_MS // 1000,
             )
             result = await self.executor.execute(
@@ -281,8 +284,18 @@ class HarnessAdapter(ABC):
                 runtime_check = await self._verify_custom_docker_runtime(policy)
                 if runtime_check is not None:
                     return runtime_check
-                return VerifyInstallResult(ok=True, version=(result.stdout.strip() or result.stderr.strip()))
-            return VerifyInstallResult(ok=False, error=result.stderr[:VERSION_ERROR_MAX_CHARS] or "non-zero exit")
+                return VerifyInstallResult(
+                    ok=True,
+                    version=(result.stdout.strip() or result.stderr.strip()),
+                    stdout=result.stdout,
+                    stderr=result.stderr,
+                )
+            return VerifyInstallResult(
+                ok=False,
+                error=result.stderr[:VERSION_ERROR_MAX_CHARS] or "non-zero exit",
+                stdout=result.stdout,
+                stderr=result.stderr,
+            )
         except Exception as e:
             return VerifyInstallResult(ok=False, error=str(e))
 
