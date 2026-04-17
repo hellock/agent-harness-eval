@@ -139,7 +139,19 @@ def _section_results(
         else:
             ranked = sorted(metrics, key=lambda item: (item.pass_at_1, item.quality_score), reverse=True)
             winner = ranked[0]
-            if len(ranked) > 1:
+            leaders = [
+                metric
+                for metric in ranked
+                if metric.pass_at_1 == winner.pass_at_1 and metric.quality_score == winner.quality_score
+            ]
+            if len(leaders) > 1:
+                leader_names = [format_harness_name(metric.harness) for metric in leaders]
+                if len(leader_names) == 2:
+                    leader_text = f"{leader_names[0]} and {leader_names[1]}"
+                else:
+                    leader_text = ", ".join(leader_names[:-1]) + f", and {leader_names[-1]}"
+                lines.append(f"{leader_text} tied on pass rate and overall quality.")
+            elif len(ranked) > 1:
                 runner_up = ranked[1]
                 lines.append(
                     f"{format_harness_name(winner.harness)} led on pass rate and overall quality. "
@@ -261,11 +273,13 @@ def _section_category_breakdown(
     largest_gap: tuple[str, float] | None = None
     for category in sorted(grouped):
         entries = grouped[category]
-        best_harness, best_rate = max(entries, key=lambda item: item[1])
+        best_rate = max(rate for _, rate in entries)
+        best_harnesses = [harness for harness, rate in entries if rate == best_rate]
         worst_rate = min(rate for _, rate in entries)
         gap = best_rate - worst_rate
         gap_label = "high" if gap >= 0.5 else "moderate" if gap >= 0.2 else "low"
-        rows.append([category.title(), format_harness_name(best_harness), format_pass_cell(best_rate), gap_label])
+        best_harness_label = format_harness_name(best_harnesses[0]) if len(best_harnesses) == 1 else "tied"
+        rows.append([category.title(), best_harness_label, format_pass_cell(best_rate), gap_label])
         if largest_gap is None or gap > largest_gap[1]:
             largest_gap = (category, gap)
 

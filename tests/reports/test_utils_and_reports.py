@@ -367,3 +367,85 @@ def test_generate_reports_single_harness_multi_model_does_not_crown_tied_models(
     assert f"`{model_a.label}` and `{model_b.label}` tied on pass rate and overall quality." in summary
     assert f"`{model_a.label}` led on pass rate" not in summary
     assert f"`{model_b.label}` led on pass rate" not in summary
+
+
+def test_generate_summary_report_does_not_crown_tied_harnesses() -> None:
+    metrics = [
+        HarnessMetrics(
+            harness="codex",
+            pass_at_1=0.0,
+            pass_at_3=0.0,
+            quality_score=0.0,
+            mean_cost_usd=0.0,
+            mean_latency_sec=0.0,
+            mean_total_tokens=0,
+            mean_tool_calls=0.0,
+            timeout_rate=0.0,
+            usage_metrics_available=False,
+        ),
+        HarnessMetrics(
+            harness="zeroclaw",
+            pass_at_1=0.0,
+            pass_at_3=0.0,
+            quality_score=0.0,
+            mean_cost_usd=0.0,
+            mean_latency_sec=0.0,
+            mean_total_tokens=0,
+            mean_tool_calls=0.0,
+            timeout_rate=0.0,
+            usage_metrics_available=False,
+        ),
+    ]
+    config = _make_config()
+    tasks = [Task(id="task.1", category="coding", description="task", user_query="answer", timeout_sec=30)]
+    results = [
+        _make_result(task_id="task.1", harness="codex", passed=False),
+        _make_result(task_id="task.1", harness="zeroclaw", passed=False),
+    ]
+
+    summary = generate_summary_report(metrics, config, results, tasks)
+
+    assert "Codex and Zeroclaw tied on pass rate and overall quality." in summary
+    assert "Codex led on pass rate and overall quality." not in summary
+    assert "Zeroclaw was the closest runner-up." not in summary
+
+
+def test_generate_summary_report_category_breakdown_marks_tied_best_harness() -> None:
+    metrics = [
+        HarnessMetrics(
+            harness="codex",
+            pass_at_1=0.0,
+            pass_at_3=0.0,
+            quality_score=0.0,
+            mean_cost_usd=0.0,
+            mean_latency_sec=0.0,
+            mean_total_tokens=0,
+            mean_tool_calls=0.0,
+            timeout_rate=0.0,
+            usage_metrics_available=False,
+        ),
+        HarnessMetrics(
+            harness="zeroclaw",
+            pass_at_1=0.0,
+            pass_at_3=0.0,
+            quality_score=0.0,
+            mean_cost_usd=0.0,
+            mean_latency_sec=0.0,
+            mean_total_tokens=0,
+            mean_tool_calls=0.0,
+            timeout_rate=0.0,
+            usage_metrics_available=False,
+        ),
+    ]
+    config = _make_config()
+    tasks = [Task(id="skills.02", category="skills", description="task", user_query="answer", timeout_sec=30)]
+    results = [
+        _make_result(task_id="skills.02", harness="codex", passed=False),
+        _make_result(task_id="skills.02", harness="zeroclaw", passed=False),
+    ]
+
+    summary = generate_summary_report(metrics, config, results, tasks)
+
+    assert "| Skills   | tied" in summary
+    assert "| Skills   | Codex" not in summary
+    assert "| Skills   | Zeroclaw" not in summary
