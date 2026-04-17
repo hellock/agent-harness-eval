@@ -155,3 +155,32 @@ setup:
     assert runtime_task.native_memory.files is not None
     assert runtime_task.native_memory.files[0]["path"] == "MEMORY.md"
     assert runtime_task.native_memory.files[0]["content"] == "remember\n"
+
+
+@pytest.mark.asyncio
+async def test_materialize_task_ignores_python_cache_artifacts(
+    isolated_tasks_dir: Path,
+) -> None:
+    task_dir = isolated_tasks_dir / "coding" / "materialize-ignore-pyc"
+    (task_dir / "workspace" / "__pycache__").mkdir(parents=True, exist_ok=True)
+    (task_dir / "workspace" / "docs").mkdir(parents=True, exist_ok=True)
+    (task_dir / "workspace" / "docs" / "README.md").write_text("seed\n", encoding="utf-8")
+    (task_dir / "workspace" / "__pycache__" / "README.cpython-312.pyc").write_bytes(b"\xcb\x00\x01")
+    (task_dir / "workspace" / "module.pyo").write_bytes(b"\x01\x02\x03")
+    _write_task_yaml(
+        task_dir,
+        """
+id: coding.95
+category: coding
+description: materialize ignore pycache
+user_query: test
+setup:
+  workspace_dir: workspace
+""".lstrip(),
+    )
+
+    [task] = load_tasks(str(isolated_tasks_dir))
+    runtime_task = task.materialize()
+
+    assert runtime_task.workspace_files is not None
+    assert [item["path"] for item in runtime_task.workspace_files] == ["docs/README.md"]

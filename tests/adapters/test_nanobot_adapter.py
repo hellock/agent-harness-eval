@@ -752,3 +752,76 @@ async def test_nanobot_run_recovers_trace_and_usage_on_timeout(
         assert result.metrics.turns == 2
     finally:
         adapter.cleanup(prepared)
+
+
+@pytest.mark.asyncio
+async def test_nanobot_run_reclassifies_tool_only_completion_as_failed(
+    isolated_run_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_dir, runtime_dir, layout = _make_layout(isolated_run_dir)
+    task = Task(
+        id="nanobot.regression.tool-only-completion",
+        category="skills",
+        description="nanobot tool-only completion",
+        user_query="Use a tool, then reply.",
+        timeout_sec=30,
+    )
+    prepared = PreparedRun(
+        task=task,
+        layout=layout,
+        env={"_EVAL_SESSION_ID": "test-session", "_EVAL_RUNTIME_DIR": str(runtime_dir)},
+        execution_policy=ExecutionPolicy(workspace_dir=str(workspace_dir)),
+    )
+    runtime_config = RuntimeConfig(
+        project_root=isolated_run_dir,
+        providers={
+            "relay": ProviderConfig(
+                base_url="https://relay.example.com/v1",
+                api_key="openai-key",
+                api_format="openai-responses",
+            )
+        },
+    )
+    executor = _RecordingExecutor(
+        runtime_config,
+        SubprocessResult(stdout="", stderr="session ended early", exit_code=0, timed_out=False),
+    )
+
+    monkeypatch.setattr(
+        "agent_harness_eval.adapters.nanobot._read_nanobot_session",
+        lambda runtime_dir, session_id: {
+            "trace": [
+                CanonicalTraceEvent(
+                    type="tool_call_started",
+                    tool_name="web_search",
+                    input='{"query":"tokyo sakura"}',
+                    ts="2026-01-01T00:00:00+00:00",
+                ),
+                CanonicalTraceEvent(
+                    type="tool_call_completed",
+                    tool_name="web_search",
+                    success=True,
+                    output="peak already passed",
+                    ts="2026-01-01T00:00:01+00:00",
+                ),
+            ],
+            "usage": {
+                "input": 15,
+                "output": 5,
+                "cache_read": 0,
+                "cache_write": 0,
+                "total": 20,
+                "turns": 1,
+            },
+            "tool_calls": 1,
+        },
+    )
+
+    result = await NanobotAdapter(runtime_config, executor).run(prepared, "relay:gpt-5.4")
+
+    assert result.status == "failed"
+    assert result.failure_origin == "adapter"
+    assert result.infra_error_code == "adapter_empty_output"
+    assert result.trace and result.trace[0].type == "task_failed"
+    assert "produced no output" in (result.trace[0].error or "")

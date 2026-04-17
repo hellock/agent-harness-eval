@@ -37,6 +37,7 @@ from .interface import (
     HarnessAdapter,
     PreparedRun,
     _write_subprocess_debug_artifacts,
+    detect_empty_output_silent_failure,
     detect_subprocess_failure,
 )
 
@@ -237,6 +238,27 @@ class ClaudeCodeAdapter(HarnessAdapter):
             total_tokens = usage["total"]
             tool_calls = len([e for e in trace if e.type == "tool_call_started"])
             turns = usage["turns"] or max(1, tool_calls)
+
+            empty_failure = detect_empty_output_silent_failure(
+                trace, final_text, command_label="Claude Code", stderr=result.stderr or ""
+            )
+            if empty_failure is not None:
+                return self._make_result(
+                    task,
+                    model,
+                    "failed",
+                    result.stdout or "",
+                    [
+                        CanonicalTraceEvent(
+                            type="task_failed",
+                            error=empty_failure.error,
+                            ts=to_canonical_ts(),
+                        )
+                    ],
+                    RunMetrics(latency_sec=latency_sec),
+                    failure_origin=empty_failure.failure_origin,
+                    infra_error_code=empty_failure.infra_error_code,
+                )
 
             trace.append(
                 CanonicalTraceEvent(

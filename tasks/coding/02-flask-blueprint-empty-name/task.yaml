@@ -2,12 +2,14 @@ id: coding.02
 category: coding
 description: "SWE-bench flask#5014: Blueprint should reject empty name"
 user_query: |
-  The `Blueprint` class in `src/flask/blueprints.py` currently accepts an empty
+  The Flask repo for this task is checked out under `repo/`.
+
+  The `Blueprint` class in `repo/src/flask/blueprints.py` currently accepts an empty
   string as the `name` argument, but this causes downstream routing failures
   (see GitHub issue pallets/flask#4944).
 
   Fix `Blueprint.__init__` so that passing an empty `name` raises a `ValueError`.
-  A test case `tests/test_blueprints.py::test_empty_name_not_allowed` already
+  A test case `repo/tests/test_blueprints.py::test_empty_name_not_allowed` already
   exists in the workspace — your fix must make it pass without breaking the
   existing tests.
 setup:
@@ -42,7 +44,7 @@ graders:
   - type: rubric_judge
     rubric: |
       The agent should:
-      1. Read the existing Blueprint.__init__ code in src/flask/blueprints.py
+      1. Read the existing Blueprint.__init__ code in repo/src/flask/blueprints.py
       2. Identify that there's already a check for '.' in the name but no check for empty string
       3. Add a ValueError check for empty name (e.g., `if not name: raise ValueError(...)`)
       4. Verify the fix passes the test

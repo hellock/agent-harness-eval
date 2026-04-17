@@ -240,6 +240,71 @@ async def test_claude_code_timeout_preserves_partial_stream_trace(
 
 
 @pytest.mark.asyncio
+async def test_claude_code_run_reclassifies_tool_only_completion_as_failed(
+    isolated_run_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_config = RuntimeConfig(
+        project_root=isolated_run_dir,
+        providers={
+            "anthropic": ProviderConfig(
+                base_url="https://relay.example.com",
+                api_key="anthropic-key",
+                api_format="anthropic",
+            )
+        },
+    )
+    executor = RecordingExecutor(
+        runtime_config,
+        SubprocessResult(stdout="", stderr="", exit_code=0, timed_out=False),
+    )
+    adapter = ClaudeCodeAdapter(runtime_config, executor)
+    task = Task(
+        id="claude.regression.tool-only-completion",
+        category="skills",
+        description="claude tool-only completion",
+        user_query="Use a tool, then reply.",
+        workspace_files=[{"path": "README.md", "content": "seed\n"}],
+        timeout_sec=30,
+    )
+    prepared = adapter.prepare(task, "claude-tool-only-completion")
+
+    try:
+
+        async def fake_run_claude_streaming(
+            command: str,
+            args: list[str],
+            *,
+            cwd: str | None = None,
+            env: dict[str, str] | None = None,
+            timeout_ms: int,
+        ) -> dict[str, object]:
+            return {
+                "stdout": "\n".join(
+                    [
+                        '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"WebSearch","input":{"query":"tokyo sakura"},"id":"tool-1"}]}}',
+                        '{"type":"user","message":{"content":[{"type":"tool_result","content":"peak already passed","tool_use_id":"tool-1"}]}}',
+                    ]
+                )
+                + "\n",
+                "stderr": "stream ended before final result",
+                "exit_code": 0,
+                "timed_out": False,
+            }
+
+        monkeypatch.setattr(claude_code_module, "_run_claude_streaming", fake_run_claude_streaming)
+        result = await adapter.run(prepared, "anthropic:claude-sonnet-4-6")
+
+        assert result.status == "failed"
+        assert result.failure_origin == "adapter"
+        assert result.infra_error_code == "adapter_empty_output"
+        assert result.trace and result.trace[0].type == "task_failed"
+        assert "produced no output" in (result.trace[0].error or "")
+    finally:
+        adapter.cleanup(prepared)
+
+
+@pytest.mark.asyncio
 async def test_claude_code_run_fails_fast_on_api_format_mismatch(
     isolated_run_dir: Path,
 ) -> None:

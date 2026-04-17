@@ -365,9 +365,13 @@ def test_empty_output_guard_lets_run_with_message_event_pass() -> None:
     assert failure is None
 
 
-def test_empty_output_guard_lets_run_with_tool_call_pass() -> None:
-    """A tool call started counts as content even without assistant message —
-    agent did something, even if it crashed before finishing the reply."""
+def test_empty_output_guard_rejects_tool_only_trace() -> None:
+    """Tool calls alone are not a valid completed answer.
+
+    The skills.02 openclaw regression completed after successful web tool use
+    but emitted no assistant-facing output. That must be classified as an
+    adapter failure, not a bad judged answer.
+    """
     failure = detect_empty_output_silent_failure(
         trace=[
             CanonicalTraceEvent(
@@ -379,7 +383,8 @@ def test_empty_output_guard_lets_run_with_tool_call_pass() -> None:
         final_text="",
         command_label="OpenClaw",
     )
-    assert failure is None
+    assert failure is not None
+    assert failure.infra_error_code == "adapter_empty_output"
 
 
 def test_empty_output_guard_ignores_only_task_completed() -> None:
@@ -418,12 +423,12 @@ def test_empty_output_guard_keeps_explicit_task_failure() -> None:
     assert failure is None
 
 
-def test_empty_output_guard_lets_run_with_tool_completed_pass() -> None:
-    """P2 review finding: openclaw's session parser can emit standalone
-    ``tool_call_completed`` events without a matching ``tool_call_started``
-    (e.g. when only the toolResult line was captured). A ``tool_call_completed``
-    is still evidence the agent did real work — must not be classified as
-    adapter_empty_output."""
+def test_empty_output_guard_rejects_tool_completed_only_trace() -> None:
+    """Completed tool output without any assistant answer is still empty.
+
+    Real work may have happened, but the harness did not produce a user-facing
+    answer, so the completed run must not survive as a judged completion.
+    """
     failure = detect_empty_output_silent_failure(
         trace=[
             CanonicalTraceEvent(
@@ -437,7 +442,8 @@ def test_empty_output_guard_lets_run_with_tool_completed_pass() -> None:
         final_text="",
         command_label="OpenClaw",
     )
-    assert failure is None
+    assert failure is not None
+    assert failure.infra_error_code == "adapter_empty_output"
 
 
 def test_empty_output_guard_includes_stderr_tail_when_provided() -> None:

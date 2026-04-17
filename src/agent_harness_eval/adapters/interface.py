@@ -110,12 +110,14 @@ def detect_empty_output_silent_failure(
     invoke this after the parser has finished running, before returning the
     "completed" RunResult.
 
-    Returns ``None`` if the run has real content (a message event, a tool
-    call, or non-empty final_text), otherwise a ``SubprocessFailure`` that
+    Returns ``None`` if the run has real assistant-facing content (a message
+    event, an explicit task failure, or non-empty final_text), otherwise a
+    ``SubprocessFailure`` that
     the caller can wrap into the RunResult's failure fields.
     """
     has_content = any(
-        event.type in ("message", "tool_call_started", "tool_call_completed", "task_failed") for event in trace
+        event.type == "task_failed" or (event.type == "message" and event.role == "assistant" and bool(event.text))
+        for event in trace
     )
     if final_text or has_content:
         return None

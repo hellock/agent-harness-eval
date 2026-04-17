@@ -39,9 +39,9 @@ graders:
       2. Subscriptions jumped from ~31/mo to ~103/mo because user added Disney+, HBO Max, Hulu, YouTube Premium, Apple TV+ in a single week (subscription bloat — easy cut)
       3. Two identical Door Dash $51.40 charges on 2026-04-10 — duplicate / probable double-charge
 
-      Reasonable cut suggestions, ranked by savings:
-      - Cancel redundant streaming subs (~60-70/mo, easy)
+      Reasonable cut suggestions:
       - Reduce Door Dash usage / cook more (~250-300/mo possible)
+      - Cancel redundant streaming subs (~60-70/mo, easy)
       - Dispute the duplicate Door Dash charge (~51 one-time)
 
       Required dimensions:
@@ -49,7 +49,7 @@ graders:
       2. dining_anomaly_caught: explicitly flagged the >3x DiningOut increase
       3. subscription_bloat_caught: explicitly flagged the 5 new streaming services
       4. duplicate_charge_caught: identified the two $51.40 Door Dash charges on the same day
-      5. cut_suggestions_quality: 3 concrete suggestions, ordered by approximate savings, with rough $ figures
+      5. cut_suggestions_quality: 3 concrete suggestions with rough $ figures; the prioritization should be sensible and consistent with the stated savings estimates, but equivalent suggestions do not need to match a single fixed order exactly
     dimensions:
       - name: monthly_totals_correct
         required: true

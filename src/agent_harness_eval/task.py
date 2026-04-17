@@ -242,6 +242,8 @@ def _load_workspace_files_from_dir(root_dir: Path) -> list[WorkspaceFile]:
     for path in sorted(root_dir.rglob("*")):
         if not path.is_file():
             continue
+        if "__pycache__" in path.parts or path.suffix.lower() in {".pyc", ".pyo"}:
+            continue
         files.append(
             {
                 "path": path.relative_to(root_dir).as_posix(),
