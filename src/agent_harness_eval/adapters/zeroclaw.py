@@ -10,8 +10,11 @@ import asyncio
 import json
 import os
 import re
+import tomllib
 from pathlib import Path
 from typing import Any, ClassVar
+
+import tomli_w
 
 from ..config.providers import parse_model_spec
 from ..constants import STDERR_PREVIEW_MAX_CHARS, TOOL_OUTPUT_MAX_CHARS
@@ -26,7 +29,9 @@ from ..utils.workspace import create_run_layout, remove_workspace
 from . import register_adapter
 from .interface import (
     HarnessAdapter,
+    ParserOutput,
     PreparedRun,
+    UsageCounts,
     _write_subprocess_debug_artifacts,
     detect_empty_output_silent_failure,
     detect_subprocess_failure,
@@ -390,89 +395,40 @@ def _patch_zeroclaw_autonomy_config(
     """Patch config.toml to allow tool use in the eval workspace.
 
     ZeroClaw's default security config blocks /tmp (where eval workspaces live)
-    and uses 'supervised' autonomy which requires interactive approval.
+    and uses 'supervised' autonomy which requires interactive approval. We also
+    enable the runtime_trace observability feed so the adapter can parse token
+    usage + tool call events back out.
+
+    Round-trips the file through ``tomllib`` + ``tomli_w`` rather than regex
+    patching so layout changes (whitespace, key order, comments) in upstream
+    onboard output don't silently break us.
     """
     cfg_path = os.path.join(config_dir, "config.toml")
     if not os.path.exists(cfg_path):
         return
 
-    with open(cfg_path) as f:
-        content = f.read()
+    with open(cfg_path, "rb") as f:
+        data = tomllib.load(f)
 
-    # Set autonomy to full (non-interactive, no approval needed)
-    content = re.sub(
-        r'^level\s*=\s*"supervised"',
-        'level = "full"',
-        content,
-        flags=re.MULTILINE,
-    )
-
-    # Remove /tmp from forbidden_paths (workspace lives there)
-    content = re.sub(
-        r'"/tmp",?\s*\n?',
-        "",
-        content,
-    )
-
-    # Set allowed_roots to include workspace
-    content = re.sub(
-        r"^allowed_roots\s*=\s*\[\]",
-        f'allowed_roots = ["{workspace_dir}"]',
-        content,
-        flags=re.MULTILINE,
-    )
-
-    # Disable require_approval_for_medium_risk
-    content = re.sub(
-        r"^require_approval_for_medium_risk\s*=\s*true",
-        "require_approval_for_medium_risk = false",
-        content,
-        flags=re.MULTILINE,
-    )
-
+    security = data.setdefault("security", {})
+    security["level"] = "full"
+    forbidden = security.get("forbidden_paths")
+    if isinstance(forbidden, list):
+        security["forbidden_paths"] = [p for p in forbidden if p != "/tmp"]
+    security["allowed_roots"] = [workspace_dir]
+    security["require_approval_for_medium_risk"] = False
     if relax_shell_commands:
-        content = re.sub(
-            r"^allowed_commands\s*=\s*\[[^\]]*\]",
-            'allowed_commands = ["*"]',
-            content,
-            flags=re.MULTILINE,
-        )
-        content = re.sub(
-            r"^block_high_risk_commands\s*=\s*true",
-            "block_high_risk_commands = false",
-            content,
-            flags=re.MULTILINE,
-        )
+        security["allowed_commands"] = ["*"]
+        security["block_high_risk_commands"] = False
+    security["max_actions_per_hour"] = 200
 
-    # Increase max_actions_per_hour for eval
-    content = re.sub(
-        r"^max_actions_per_hour\s*=\s*\d+",
-        "max_actions_per_hour = 200",
-        content,
-        flags=re.MULTILINE,
-    )
-
-    # Enable runtime trace for observability (token usage + tool call events).
     trace_path = os.path.join(config_dir, "runtime_trace.jsonl")
-    if "[observability]" not in content:
-        content += f'\n[observability]\nruntime_trace_mode = "full"\nruntime_trace_path = "{trace_path}"\n'
-    else:
-        # Section exists (from onboard) — override mode and path.
-        content = re.sub(
-            r'^runtime_trace_mode\s*=\s*"[^"]*"',
-            'runtime_trace_mode = "full"',
-            content,
-            flags=re.MULTILINE,
-        )
-        content = re.sub(
-            r'^runtime_trace_path\s*=\s*"[^"]*"',
-            f'runtime_trace_path = "{trace_path}"',
-            content,
-            flags=re.MULTILINE,
-        )
+    observability = data.setdefault("observability", {})
+    observability["runtime_trace_mode"] = "full"
+    observability["runtime_trace_path"] = trace_path
 
-    with open(cfg_path, "w") as f:
-        f.write(content)
+    with open(cfg_path, "wb") as f:
+        tomli_w.dump(data, f)
 
 
 def _normalize_runtime_trace_ts(raw: Any) -> str:
@@ -491,7 +447,7 @@ def _normalize_runtime_trace_ts(raw: Any) -> str:
     return to_canonical_ts(raw)
 
 
-def _read_zeroclaw_runtime_trace(trace_path: str) -> dict[str, Any]:
+def _read_zeroclaw_runtime_trace(trace_path: str) -> ParserOutput:
     """Parse a ZeroClaw runtime_trace.jsonl file for token usage and tool events.
 
     ZeroClaw emits JSONL events with ``event_type`` fields such as:
@@ -499,12 +455,9 @@ def _read_zeroclaw_runtime_trace(trace_path: str) -> dict[str, Any]:
     - ``tool_call_start`` / ``tool_result`` — contain tool call info
     - ``agent_start`` / ``agent_end`` — session boundaries
     """
-    # Canonical parser-output shape (see also codex, claude-code): the usage
-    # dict uses ``total`` (not ``total_tokens``) and ``tool_calls`` is
-    # returned top-level alongside usage, never nested inside it. Downstream
-    # probe / runner normalization assumes this shape; don't drift.
+    # Canonical shape: see ParserOutput / UsageCounts in adapters.interface.
     trace: list[CanonicalTraceEvent] = []
-    usage: dict[str, int] = {
+    usage: UsageCounts = {
         "input": 0,
         "output": 0,
         "cache_read": 0,

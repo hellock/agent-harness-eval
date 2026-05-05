@@ -6,7 +6,7 @@ import asyncio
 import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, ClassVar
+from typing import Any, ClassVar, NotRequired, TypedDict
 
 from ..config.providers import ApiFormat, ModelSpec, ProviderConfig
 from ..config.runtime import RuntimeConfig
@@ -43,6 +43,42 @@ class PreparedRun:
 class NativeMemoryFile:
     path: str
     content: str
+
+
+class UsageCounts(TypedDict):
+    """Per-run token accounting emitted by every adapter parser.
+
+    Field set is canonical across harnesses — adapters whose underlying
+    provider doesn't expose a counter (e.g. zeroclaw / codex have no
+    cache-write line item) must still emit the key as ``0`` so downstream
+    aggregation is uniform. ``total`` is the sum of in+out+cache_read+cache_write
+    when the harness reports it that way; some harnesses (nanobot) read
+    ``total_tokens`` from a provider field instead.
+    """
+
+    input: int
+    output: int
+    cache_read: int
+    cache_write: int
+    total: int
+    turns: int
+
+
+class ParserOutput(TypedDict):
+    """Canonical return shape for adapter session/stream parsers.
+
+    Every harness parser (``_read_*_session`` / ``_parse_*_jsonl``) returns
+    this shape so callers in ``run()`` and the probe-replay layer can read
+    ``data["trace"]`` / ``data["usage"]`` / ``data["tool_calls"]`` without
+    branching on harness. ``final_text`` is only emitted by codex (its
+    ``agent_message`` arrives in the same stream); other adapters extract the
+    final answer via a separate ``_extract_*_final_text`` helper.
+    """
+
+    trace: list[CanonicalTraceEvent]
+    usage: UsageCounts
+    tool_calls: int
+    final_text: NotRequired[str]
 
 
 @dataclass(slots=True)

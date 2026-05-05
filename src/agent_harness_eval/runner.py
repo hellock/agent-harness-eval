@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import shutil
 import uuid
@@ -37,6 +38,8 @@ from .utils.conversation import format_task_message
 from .utils.cost import ModelPricing, calculate_cost_no_cache
 from .utils.failure_origin import detect_failure_origin_from_error
 from .utils.timestamps import to_canonical_ts
+
+logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 R = TypeVar("R")
@@ -188,7 +191,7 @@ def _persist_debug_artifacts(
             else:
                 shutil.copy2(src, dest)
         except Exception:
-            pass
+            logger.debug("Failed to persist debug artifact %s -> %s", src, dest, exc_info=True)
 
 
 def _score_result(result: RunResult) -> float:
@@ -276,7 +279,7 @@ async def _finalize_prepared_run(
         try:
             adapter.cleanup(prepared)
         except Exception:
-            pass
+            logger.debug("Adapter cleanup failed for %s", prepared.workspace_dir, exc_info=True)
         return
 
     try:
@@ -285,7 +288,7 @@ async def _finalize_prepared_run(
         with open(os.path.join(trace_dir, "kept_run_root.txt"), "w") as f:
             f.write(prepared.layout.root_dir + "\n")
     except Exception:
-        pass
+        logger.debug("Failed to record kept-workspace paths in %s", trace_dir, exc_info=True)
 
 
 async def _prepare_run(

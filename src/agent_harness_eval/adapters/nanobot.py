@@ -29,7 +29,9 @@ from . import register_adapter
 from .interface import (
     HarnessAdapter,
     NativeMemoryFile,
+    ParserOutput,
     PreparedRun,
+    UsageCounts,
     _write_subprocess_debug_artifacts,
     detect_empty_output_silent_failure,
     detect_subprocess_failure,
@@ -688,13 +690,11 @@ def _normalize_session_ts(raw: Any) -> str:
     return to_canonical_ts(raw)
 
 
-def _read_nanobot_session(runtime_dir: str, session_id: str) -> dict[str, Any]:
-    # Canonical parser-output shape (see codex/zeroclaw/hermes): ``total``
-    # (not ``total_tokens``); ``tool_calls`` returned top-level alongside
-    # usage. Keeps the field set uniform across every adapter parser.
+def _read_nanobot_session(runtime_dir: str, session_id: str) -> ParserOutput:
+    # Canonical shape: see ParserOutput / UsageCounts in adapters.interface.
     session_path = Path(runtime_dir) / "sessions" / f"{session_id}.jsonl"
     trace: list[CanonicalTraceEvent] = []
-    usage = {
+    usage: UsageCounts = {
         "input": 0,
         "output": 0,
         "cache_read": 0,

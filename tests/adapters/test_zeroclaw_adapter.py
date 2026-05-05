@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 import tempfile
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -491,13 +492,21 @@ def test_patch_zeroclaw_autonomy_config_relaxes_shell_policy_for_docker(tmp_path
         relax_shell_commands=True,
     )
 
-    content = config_path.read_text(encoding="utf-8")
-    assert 'level = "full"' in content
-    assert f'allowed_roots = ["{workspace_dir}"]' in content
-    assert 'allowed_commands = ["*"]' in content
-    assert "block_high_risk_commands = false" in content
-    assert "require_approval_for_medium_risk = false" in content
-    assert "workspace_only = true" in content
+    with open(config_path, "rb") as f:
+        patched = tomllib.load(f)
+
+    security = patched["security"]
+    assert security["level"] == "full"
+    assert security["allowed_roots"] == [str(workspace_dir)]
+    assert security["allowed_commands"] == ["*"]
+    assert security["block_high_risk_commands"] is False
+    assert security["require_approval_for_medium_risk"] is False
+    assert security["workspace_only"] is True
+    assert security["forbidden_paths"] == ["/etc"]
+    assert security["max_actions_per_hour"] == 200
+    observability = patched["observability"]
+    assert observability["runtime_trace_mode"] == "full"
+    assert observability["runtime_trace_path"] == str(config_dir / "runtime_trace.jsonl")
 
 
 @pytest.mark.asyncio

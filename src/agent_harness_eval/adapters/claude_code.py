@@ -36,6 +36,7 @@ from . import register_adapter
 from .interface import (
     HarnessAdapter,
     PreparedRun,
+    UsageCounts,
     _write_subprocess_debug_artifacts,
     detect_empty_output_silent_failure,
     detect_subprocess_failure,
@@ -601,17 +602,16 @@ def _extract_final_text(events: list[dict[str, Any]]) -> str:
     return ""
 
 
-def _aggregate_usage(events: list[dict[str, Any]]) -> dict[str, int]:
+def _aggregate_usage(events: list[dict[str, Any]]) -> UsageCounts:
     """Aggregate token usage across all stream events.
 
     Claude Code stream-json puts usage inside assistant message objects
-    (message.usage) and also in the top-level result event.
+    (message.usage) and also in the top-level result event. claude-code
+    composes its parser output piecewise — ``run()`` (and the probe replay)
+    bundle this UsageCounts together with the trace and final_text into the
+    canonical ParserOutput shape.
     """
-    # Canonical parser-output shape: ``turns`` (not ``calls``), ``total``
-    # derived from in+out+cr+cw. claude-code's ``_aggregate_usage`` is
-    # called from run() which composes it with trace + final_text; the
-    # probe's replay reuses the same composition.
-    usage = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "total": 0, "turns": 0}
+    usage: UsageCounts = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "total": 0, "turns": 0}
     for event in events:
         # Check top-level usage (result events)
         u = event.get("usage")

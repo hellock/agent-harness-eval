@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from typing import Any, ClassVar
+from typing import ClassVar
 
 from ..config.providers import parse_model_spec
 from ..constants import STDERR_PREVIEW_MAX_CHARS, TOOL_OUTPUT_MAX_CHARS
@@ -23,7 +23,9 @@ from ..utils.workspace import create_run_layout, remove_workspace
 from . import register_adapter
 from .interface import (
     HarnessAdapter,
+    ParserOutput,
     PreparedRun,
+    UsageCounts,
     _write_subprocess_debug_artifacts,
     detect_empty_output_silent_failure,
     detect_subprocess_failure,
@@ -299,7 +301,7 @@ class CodexAdapter(HarnessAdapter):
 _CODEX_NON_TOOL_ITEM_TYPES = frozenset({"agent_message", "reasoning"})
 
 
-def _parse_codex_jsonl(stdout: str) -> dict[str, Any]:
+def _parse_codex_jsonl(stdout: str) -> ParserOutput:
     """Parse ``codex exec --json`` output.
 
     Schema (verified empirically against codex 0.x binary, April 2026):
@@ -332,7 +334,7 @@ def _parse_codex_jsonl(stdout: str) -> dict[str, Any]:
     """
     trace: list[CanonicalTraceEvent] = []
     final_text = ""
-    usage = {
+    usage: UsageCounts = {
         "input": 0,
         "output": 0,
         "cache_read": 0,

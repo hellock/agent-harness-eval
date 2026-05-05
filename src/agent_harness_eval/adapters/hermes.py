@@ -28,7 +28,9 @@ from . import register_adapter
 from .interface import (
     HarnessAdapter,
     NativeMemoryFile,
+    ParserOutput,
     PreparedRun,
+    UsageCounts,
     detect_empty_output_silent_failure,
 )
 
@@ -350,20 +352,16 @@ def _extract_response_text(stdout: str) -> str:
 def _read_hermes_session(
     runtime_dir: str,
     session_id: str | None,
-) -> dict[str, Any]:
+) -> ParserOutput:
     """Read session data from the Hermes SQLite database.
 
     Hermes stores all session state in ``$HERMES_HOME/state.db``.  The
     adapter sets ``HERMES_HOME`` to runtime_dir, so the database is at
     ``runtime_dir/state.db``.
-
-    Returns a dict with ``trace`` (list of CanonicalTraceEvent) and
-    ``usage`` (dict of token counts and tool_calls).
     """
-    # Canonical parser-output shape (see codex/zeroclaw): ``total`` (not
-    # ``total_tokens``); ``tool_calls`` returned top-level alongside usage.
+    # Canonical shape: see ParserOutput / UsageCounts in adapters.interface.
     trace: list[CanonicalTraceEvent] = []
-    usage = {
+    usage: UsageCounts = {
         "input": 0,
         "output": 0,
         "cache_read": 0,

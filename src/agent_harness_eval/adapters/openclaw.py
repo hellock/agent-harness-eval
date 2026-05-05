@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import uuid
@@ -27,11 +28,15 @@ from . import register_adapter
 from .interface import (
     HarnessAdapter,
     NativeMemoryFile,
+    ParserOutput,
     PreparedRun,
+    UsageCounts,
     _write_subprocess_debug_artifacts,
     detect_empty_output_silent_failure,
     detect_subprocess_failure,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @register_adapter
@@ -863,12 +868,10 @@ def _looks_like_tool_failure(text: str) -> bool:
     return bool(re.search(r"EISDIR|ENOENT|EACCES|permission denied", text, re.IGNORECASE))
 
 
-def _read_openclaw_session_with_usage(state_dir: str, agent_id: str, session_id: str) -> dict[str, Any]:
-    # Canonical parser-output shape (see codex/zeroclaw/hermes/nanobot):
-    # ``total`` (not ``total_tokens``), ``turns`` (not ``calls``), and
-    # ``tool_calls`` returned top-level alongside usage.
+def _read_openclaw_session_with_usage(state_dir: str, agent_id: str, session_id: str) -> ParserOutput:
+    # Canonical shape: see ParserOutput / UsageCounts in adapters.interface.
     trace: list[CanonicalTraceEvent] = []
-    usage = {
+    usage: UsageCounts = {
         "input": 0,
         "output": 0,
         "cache_read": 0,
@@ -982,7 +985,10 @@ def _read_openclaw_session_with_usage(state_dir: str, agent_id: str, session_id:
                 )
             )
     except Exception:
-        pass
+        # Don't let a malformed session line abort the run — but do surface it,
+        # otherwise a parser bug looks like an empty trace and gets reported as
+        # ``adapter_empty_output`` with no clue to the root cause.
+        logger.warning("Failed to parse openclaw session for agent %s", agent_id, exc_info=True)
 
     tool_calls_count = sum(1 for e in trace if e.type == "tool_call_started")
     return {"trace": trace, "usage": usage, "tool_calls": tool_calls_count}
